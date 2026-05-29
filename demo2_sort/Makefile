@@ -3,7 +3,7 @@ NVCC    ?= nvcc
 ARCH    ?= --generate-code=arch=compute_89,code=sm_89
 NVFLAGS ?= -O3 -lineinfo -std=c++17 $(ARCH)
 
-SRCS := $(wildcard v*.cu)
+SRCS := $(wildcard v*.cu) $(wildcard *_check.cu)
 BINS := $(SRCS:.cu=)
 
 all: $(BINS)
