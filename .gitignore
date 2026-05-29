@@ -1,0 +1,32 @@
+# Compiled demo binaries (no extension; gitignore matches basename anywhere)
+stream_gpu
+stream_cpu
+v0_naive
+v1_shared
+v2_shuffle
+v3_multiblock
+v4_cub
+naive_harness
+pool_harness
+graph_harness
+*.o
+
+# Generated profiling / SASS artifacts
+sass_out/
+ncu_out/
+nsys_out/
+*.ncu-rep
+*.nsys-rep
+*.cubin
+*.sass
+*.ptxas
+*.sqlite
+
+# clangd: machine-specific (regenerate via scripts/gen_compile_commands.py)
+compile_commands.json
+.cache/
+
+# Python / Jupyter
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

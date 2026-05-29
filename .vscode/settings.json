@@ -1,0 +1,11 @@
+{
+  "// note": "Use clangd-20 (the default clangd-14 predates CUDA 12.9 and misreports the version). The .clangd file and compile_commands.json drive flags.",
+  "clangd.path": "/usr/bin/clangd-20",
+  "clangd.arguments": [
+    "--background-index",
+    "--clang-tidy",
+    "--header-insertion=never",
+    "--compile-commands-dir=${workspaceFolder}"
+  ],
+  "C_Cpp.intelliSenseEngine": "disabled"
+}

@@ -1,0 +1,29 @@
+# clangd project config for the GPGPU course (CUDA + OpenMP).
+# Primary flags come from compile_commands.json (run scripts/gen_compile_commands.py).
+# This file adds global safety nets and strips nvcc-only flags that clang rejects,
+# so things still work for headers opened standalone or if a Bear-generated DB
+# (with raw nvcc flags) is ever used instead.
+CompileFlags:
+  Add:
+    - --cuda-path=/opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9
+    - --cuda-gpu-arch=sm_89
+    - -I/opt/nvidia/hpc_sdk/Linux_x86_64/25.5/cuda/12.9/targets/x86_64-linux/include
+    - -std=c++17
+    - -Wno-unknown-cuda-version
+  Remove:
+    - --generate-code=*
+    - -gencode*
+    - --compiler-options*
+    - -Xcompiler*
+    - -Xptxas*
+    - -lineinfo
+    - -rdc=*
+    - --expt-*
+    - -forward-unknown-to-host-compiler
+    - -ccbin*
+    - --options-file
+
+Diagnostics:
+  UnusedIncludes: None
+  Suppress:
+    - unknown_cuda_version
