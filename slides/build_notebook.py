@@ -31,6 +31,28 @@ A 1-hour course for database & systems researchers. One thesis, proven by measur
 and a production library is just a **frozen cost-model decision tree** that picks between them for you.
 """)
 
+md(r"""
+## Time budget -- 1 hour (~55 min content + 5 Q&A)
+
+| # | section | min | note |
+|---|---|---|---|
+| 0 | Thesis + hardware | 3 | core |
+| 1 | Bandwidth identity | 4 | core |
+| 2 | Cache cliff (measure at GB) | 4 | core |
+| 3 | **Cost model in two lines** (thrust dispatch) | 5 | the hook |
+| 4 | Two sorts (framing) | 2 | core |
+| 4a | Radix: passes-law + 4x merge | 9 | core |
+| 4b | Merge: hierarchy + ablation | 9 | core |
+| 5 | Kernel is ~10% (rug pull) | 6 | keep |
+| 6 | Model is a fiction (SASS) | 4 | **cuttable** |
+| 7 | Histogram (supporting) | 6 | **cuttable** |
+| 8 | Closing | 3 | core |
+| - | Q&A | 5 | buffer |
+
+The two **cuttable** rows (SASS + histogram ~10 min) are the slack: spend it on
+more centerpiece depth (e.g. more ablation knobs) or trim to land under the hour.
+""")
+
 code(r"""
 %matplotlib inline
 import subprocess, re, os
@@ -57,7 +79,7 @@ print("built.")
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 1. The chip's identity is bandwidth
+## 1. The chip's identity is bandwidth  (~4 min)
 
 A trivial streaming copy. The CPU's STREAM Triad tops out well below its (small) DRAM peak; the GPU's copy kernel saturates its (much larger) bus. The story is the *ratio*, and that the GPU number comes from a kernel you could write in your sleep.
 """)
@@ -75,7 +97,7 @@ plt.show()
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 2. ...but the cache hides it -- so measure at GB scale
+## 2. ...but the cache hides it -- so measure at GB scale  (~4 min)
 
 Run the *same naive sort kernel* across sizes. Below 96 MB the array lives in L2 and throughput is ~4x higher than reality; cross the L2 and you fall off a cliff to true HBM-bound speed.
 
@@ -96,7 +118,7 @@ plt.show()
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 3. The cost model, in two lines of user code
+## 3. The cost model, in two lines of user code  (~5 min, the hook)
 
 The highest-level GPU sort API -- `thrust::sort`, the `std::sort` equivalent -- *already* embodies the thesis. Its dispatch (`thrust/system/cuda/detail/sort.h`, `can_use_primitive_sort`) picks at **compile time**:
 
@@ -119,11 +141,11 @@ plt.show()
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 4. Two sorts, two truths about the chip
+## 4. Two sorts, two truths about the chip  (framing ~2 min)
 
 Why ship *both*? Because there's no single best sort -- the cost model picks the game. The two algorithms illuminate the two halves of "what is a GPU."
 
-### 4a. Radix -- *massive parallelism collapses the algorithm; linear time wins*
+### 4a. Radix -- *massive parallelism collapses the algorithm; linear time wins*  (~9 min)
 
 On a CPU you're taught O(n log n) comparison sort is optimal and you ignore radix for its constants. The GPU inverts the cost model: with near-perfect data-parallelism the per-element work is free, so **only passes over memory count** -- and O(n)-pass radix beats O(n log n) merge. First, the naive-to-radix arc (bitonic is just the bad global-memory baseline that motivates it); then radix vs a *fully optimized* CUB merge at GB scale.
 """)
@@ -147,7 +169,7 @@ plt.tight_layout(); plt.show()
 """)
 
 md(r"""
-### 4b. Merge -- *the cache / access-pattern / memory-hierarchy story*
+### 4b. Merge -- *the cache / access-pattern / memory-hierarchy story*  (~9 min)
 
 Merge is the **general** sort (any comparator, where radix can't go), and its CUB implementation is pure hierarchy choreography -- you don't change the algorithm, you change *where the data lives and how you touch it*:
 - **per-thread register sorting-networks** (`StableOddEvenSort` on `keys[ITEMS_PER_THREAD]`),
@@ -159,7 +181,7 @@ The honest open question (the live deep-dive): on this hardware, does *gradually
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 5. The kernel is ~10%
+## 5. The kernel is ~10%  (~6 min)
 
 Take the best hand-rolled sort and wrap it the way a query stage actually runs: allocate, copy in, sort, copy out, free -- every iteration. The kernel never changes, yet per-iteration time swings wildly. `cudaMalloc`/`cudaFree` are synchronous driver calls; a stream-ordered pool (`cudaMallocAsync`) and a CUDA graph claw the time back -- none of it by touching the kernel.
 """)
@@ -178,7 +200,7 @@ plt.show()
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 6. The model is a fiction
+## 6. The model is a fiction  (~4 min, cuttable)
 
 One GPU here, so no live hardware swap. The compile-time version is sharper: the *same source* compiles to different machine code per architecture, because `ptxas` exploits arch-specific instructions. You write `min/max`; on Hopper it becomes `VIMNMX`. CUB goes further and ships per-arch kernels emitting Hopper *collective* instructions the CUDA C model never surfaces. (Loaded from `demo4_hwswap/run_all.sh`.)
 """)
@@ -194,7 +216,7 @@ else:
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 7. Supporting demo: histogram = the contention story (and "high-card -> just sort")
+## 7. Supporting demo: histogram = the contention story (and "high-card -> just sort")  (~6 min, cuttable)
 
 A histogram reads N keys once, trivial compute -> arithmetic intensity ~0.5 ops/byte, deeply memory-bound, floor = bytes/bandwidth (~1.1 ms for 1 GB). The lesson is *whether you reach that floor*:
 - **naive global atomics**: ~2% of peak -- not bandwidth-bound, **atomic-contention-bound** (the bus sits idle while warps stall on serialized atomics).
@@ -217,7 +239,7 @@ plt.show()
 
 # ----------------------------------------------------------------------------
 md(r"""
-## Closing: the library is a frozen cost-model decision tree
+## Closing: the library is a frozen cost-model decision tree  (~3 min)
 
 Everything pointed one way. `thrust::sort` picks radix-vs-merge by *type*, at compile time. CUB ships *both* sorts and *both* a `BLOCK_HISTO_ATOMIC` and a `BLOCK_HISTO_SORT`. The experts didn't find *the* answer -- they encoded the **question** and a chooser, because the right choice is a function of the input and the chip.
 
