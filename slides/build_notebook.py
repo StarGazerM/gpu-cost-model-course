@@ -74,7 +74,18 @@ print("built.")
 md(r"""
 ## 1. The chip's identity is bandwidth  (~4 min)
 
+> **Demo** `demo1_bandwidth` &middot; **in:** one ~1 GB array &middot; **out:** achieved GB/s &middot; **algorithm:** trivial vectorized streaming copy `out[i]=in[i]` (GPU) and STREAM Triad `a=b+s*c` (CPU) &middot; **why:** the simplest possible kernel, so the only thing measured is the bus -- it establishes bandwidth as the chip's identity.
+
 A trivial streaming copy. The CPU's STREAM Triad tops out well below its (small) DRAM peak; the GPU's copy kernel saturates its (much larger) bus. The story is the *ratio*, and that the GPU number comes from a kernel you could write in your sleep.
+
+```cpp
+// float4 = 16 B/thread, fully coalesced, grid-stride
+__global__ void copy(float4* out, const float4* in, size_t n) {
+  for (size_t i = blockIdx.x*blockDim.x + threadIdx.x; i < n;
+       i += gridDim.x*blockDim.x)            // every thread strides the array
+    out[i] = in[i];
+}
+```
 """)
 code(r"""
 g = grab(sh("./stream_gpu", cwd=f"{ROOT}/demo1_bandwidth"), r"copy kernel:\s*([\d.]+)")
@@ -92,11 +103,23 @@ plt.show()
 md(r"""
 ## 2. The hidden half: latency, and how the GPU hides it  (~6 min)
 
+> **Demo** `demo7_latency` &middot; **in:** a 1 GB int array wired as one random permutation cycle (the chase) + a 1 GB copy buffer &middot; **out:** ns per access, and a bandwidth-vs-warp-count curve &middot; **algorithm:** single-thread dependent-load pointer chase (raw latency), then the copy kernel swept over warp counts (hiding) &middot; **why:** isolate latency with one thread, then show bandwidth IS hidden latency -- this is what motivates concurrency/occupancy.
+
 That bandwidth is **not free** -- it's *hidden latency*. The GPU's per-access latency is **bad**: a single thread chasing dependent loads to HBM waits hundreds of ns / hundreds of cycles per access -- worse than a CPU cache. **One GPU thread is slow.**
 
 The trick is **concurrency**: oversubscribe with thousands of warps; when one stalls on a load, the scheduler switches to a ready one in *zero cycles* (every warp's state lives in the register file). Bandwidth is simply what you get once enough warps are in flight to cover every stall. Watch the *same copy kernel* climb from a few % to ~85% of peak as we add warps -- that curve is the GPU's whole personality.
 
 **Little's law:** bandwidth = bytes-in-flight / latency. To fill ~960 GB/s at ~230 ns you need ~220 KB in flight -> thousands of concurrent loads -> thousands of warps. *That* is why the chip has a ~36 MB register file and lightweight threads. Not just parallel -- **concurrent**.
+
+```cpp
+// dependent loads: each waits for the previous -> raw latency, nothing to hide it
+__global__ void chase(const int* next, int steps, int* sink) {
+  int idx = 0;
+  for (int i = 0; i < steps; ++i) idx = next[idx];   // address depends on last load
+  *sink = idx;
+}                                                    // launched <<<1,1>>>: one thread
+// Part B sweeps the SAME copy() kernel above over more and more warps.
+```
 """)
 code(r"""
 out = sh("./latency", cwd=f"{ROOT}/demo7_latency"); print(out)
@@ -116,7 +139,20 @@ plt.show()
 md(r"""
 ## 3. ...and the cache hides it too -- so measure at GB scale  (~4 min)
 
+> **Demo** `demo2_sort/v0_naive` &middot; **in:** 2^24..2^27 random int32 keys &middot; **out:** sort throughput vs array size &middot; **algorithm:** naive bitonic sort (one global-memory kernel per compare-swap stage) &middot; **why:** the same kernel across sizes exposes the L2 cliff -- proof a sub-cache benchmark lies, so measure at >= 1 GB.
+
 Run the *same naive sort kernel* across sizes. Below 96 MB the array lives in L2 and throughput is ~4x higher than reality; cross the L2 and you fall off a cliff to true HBM-bound speed. **Any benchmark that fits in cache is lying to you** -- everything past here runs at >= 1 GB.
+
+```cpp
+// naive bitonic: one kernel launch PER stage, every compare-swap hits global memory
+__global__ void stage(int* a, int n, int j, int k) {
+  int i = blockIdx.x*blockDim.x + threadIdx.x, ixj = i ^ j;
+  if (ixj > i) {
+    bool asc = (i & k) == 0;
+    if ((a[i] > a[ixj]) == asc) { int t=a[i]; a[i]=a[ixj]; a[ixj]=t; }
+  }
+}
+```
 """)
 code(r"""
 sizes = [24, 25, 26, 27]
@@ -134,6 +170,8 @@ plt.show()
 md(r"""
 ## 4. The cost model, in two lines of user code  (~5 min, the hook)
 
+> **Demo** `demo6_mergesort/thrust_compare` &middot; **in:** 2^28 random int32 &middot; **out:** runtime of `thrust::sort` with a default vs a custom comparator &middot; **algorithm:** `thrust::sort`, which dispatches to radix or merge by key/comparator *type* &middot; **why:** the cost-model decision is already baked into the highest-level API -- the hook.
+
 The highest-level GPU sort API -- `thrust::sort` -- *already* embodies the thesis. Its dispatch (`thrust/system/cuda/detail/sort.h`, `can_use_primitive_sort`) picks at **compile time**:
 
 ```cpp
@@ -142,6 +180,13 @@ The highest-level GPU sort API -- `thrust::sort` -- *already* embodies the thesi
 ```
 
 These two calls sort the *same data into the same order* -- the only difference is a comparator whose type happens to mean `a < b` -- yet one is several times slower, because its type blocks the radix path. **The cost model, triggered by a type, invisible to the user.**
+
+```cpp
+struct MyLess { __device__ bool operator()(int a, int b) const { return a < b; } };
+
+thrust::sort(d.begin(), d.end());             // -> radix  (arithmetic key + default less)
+thrust::sort(d.begin(), d.end(), MyLess());   // -> merge  (custom comparator TYPE blocks radix)
+```
 """)
 code(r"""
 out = sh("./thrust_compare 28 6", cwd=f"{ROOT}/demo6_mergesort"); print(out)
@@ -161,7 +206,17 @@ Why ship *both*? Because there's no single best sort -- the cost model picks the
 
 ### 5a. Radix -- *massive parallelism collapses the algorithm; linear time wins*  (~9 min)
 
+> **Demo** `demo2_sort` (v0->v4) + `demo6_mergesort/cub_compare` &middot; **in:** 2^26 / 2^28 random int32 &middot; **out:** per-version runtime; CUB merge vs radix at 1 GB &middot; **algorithm:** the bitonic optimization arc ending in CUB radix, then radix vs a fully-tuned CUB merge &middot; **why:** hand-tuning a comparison sort has a ceiling; on a bandwidth machine the linear-pass algorithm (radix) wins.
+
 On a CPU you're taught O(n log n) comparison sort is optimal and you ignore radix for its constants. The GPU inverts the cost model: with near-perfect data-parallelism the per-element work is free, so **only passes over memory count** -- and O(n)-pass radix beats O(n log n) merge. The naive-to-radix arc (bitonic is just the bad global-memory baseline that motivates it), then radix vs a *fully optimized* CUB merge at GB scale.
+
+```cpp
+// production radix is two lines: ask for scratch, then sort
+size_t bytes = 0;
+cub::DeviceRadixSort::SortKeys(nullptr,  bytes, d_in, d_out, n);
+cudaMalloc(&d_temp, bytes);
+cub::DeviceRadixSort::SortKeys(d_temp, bytes, d_in, d_out, n);
+```
 """)
 code(r"""
 ARC = [("v0_naive","v0 naive"),("v1_shared","v1 shared"),("v3_multiblock","v3 big-tile"),("v4_cub","v4 CUB radix")]
@@ -183,9 +238,25 @@ plt.tight_layout(); plt.show()
 md(r"""
 ### 5b. Merge -- *the cache / access-pattern / memory-hierarchy story*  (~9 min)
 
+> **Demo** `demo6_mergesort/merge_ablation` &middot; **in:** 2^28 random int32 &middot; **out:** Mkeys/s vs ITEMS_PER_THREAD &middot; **algorithm:** a CUB-faithful merge sort (per-thread register network -> shared MergePath block merge -> device MergePath merge), recompiled with one opt removed &middot; **why:** ablate from the optimized code -- NVIDIA added each opt deliberately, so removing it measures its worth; tests whether gradual tuning climbs on modern HW.
+
 Merge is the **general** sort (any comparator, where radix can't go), and its CUB implementation is pure hierarchy choreography -- you don't change the algorithm, you change *where data lives and how you touch it*: per-thread **register sorting-networks**, **shared-memory merge tiles** with **`MergePath` co-rank**, and a device-level merge of tiles.
 
 Does *gradually tuning* those layers actually climb on this hardware, or has the big L2 + fast shared atomics flattened the middle? We ablate -- start from CUB-faithful code, remove one optimization at a time at GB scale. Register blocking (`ITEMS_PER_THREAD`) is the first knob:
+
+```cpp
+// per-thread register sorting network (data-oblivious, branchless)
+__device__ void net_sort(int (&a)[IPT]) {
+  for (int i=0;i<IPT;++i) for (int j=i&1; j+1<IPT; j+=2)
+    if (a[j] > a[j+1]) { int t=a[j]; a[j]=a[j+1]; a[j+1]=t; }
+}
+// MergePath co-rank: where does this thread's output diagonal split the two runs?
+__device__ int merge_path(const int* A,int aN,const int* B,int bN,int diag){
+  int lo = max(0,diag-bN), hi = min(diag,aN);
+  while (lo<hi){ int m=(lo+hi)/2; if (A[m] <= B[diag-1-m]) lo=m+1; else hi=m; }
+  return lo;                       // -> each thread merges its IPT-slice in parallel
+}
+```
 """)
 code(r"""
 # register-blocking ablation: rebuild merge sort with IPT 1..16 and sort 1 GB
@@ -207,7 +278,20 @@ print("The merge-tuning arc is NOT flat: structural/data-layout opts hold on mod
 md(r"""
 ## 6. The kernel is ~10%  (~6 min)
 
+> **Demo** `demo3_rugpull` &middot; **in:** 2^20 keys wrapped in a per-iteration allocate/copy/sort/copy/free loop &middot; **out:** per-iteration ms for naive vs pool vs graph &middot; **algorithm:** the same v3 sort, with cudaMalloc vs cudaMallocAsync vs a captured CUDA graph &middot; **why:** the kernel is unchanged across all three -- it shows allocation/orchestration, not the kernel, dominates.
+
 Take the best hand-rolled sort and wrap it the way a query stage actually runs: allocate, copy in, sort, copy out, free -- every iteration. The kernel never changes, yet per-iteration time swings wildly. `cudaMalloc`/`cudaFree` are synchronous driver calls; a stream-ordered pool (`cudaMallocAsync`) and a CUDA graph claw the time back -- none of it by touching the kernel.
+
+```cpp
+for (int i = 0; i < N; ++i) {
+  cudaMalloc(&d_in, bytes);  cudaMalloc(&d_out, bytes);   // synchronous: serialize device
+  cudaMemcpyAsync(d_in, h, bytes, H2D, s);
+  sort(d_in, n, s);
+  cudaMemcpyAsync(h, d_in, bytes, D2H, s);
+  cudaFree(d_in);  cudaFree(d_out);                       // synchronous too
+}
+// the fix, same kernel: cudaMallocAsync(&d,bytes,s) / cudaFreeAsync(d,s)  (+ a CUDA graph)
+```
 """)
 code(r"""
 H = ["naive", "pool", "graph"]
