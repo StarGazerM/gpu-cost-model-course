@@ -9,6 +9,7 @@ v4_cub
 naive_harness
 pool_harness
 graph_harness
+launch_overhead_check
 *.o
 
 # Generated profiling / SASS artifacts

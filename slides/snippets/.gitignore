@@ -1,0 +1,5 @@
+# Ignore compiled snippet binaries; keep sources and Makefile.
+*
+!*.cu
+!Makefile
+!.gitignore

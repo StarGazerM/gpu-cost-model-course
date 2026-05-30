@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
-"""Turn profiler output + benchmark runs into slide CSVs and figures.
+"""Parse Nsight Compute output into the per-kernel slide table + appendix figure.
 
 Outputs (into ../slides/figs):
   sort_kernel_metrics.csv   per-(version,kernel) table parsed from ncu_out/*.csv
-  fig_demo1_bandwidth.png   CPU STREAM vs GPU copy (run demo1 binaries)
-  fig_demo2_arc.png         v0..v4 runtime + speedup (run demo2 binaries)
   fig_demo2_kernels.png     DRAM %-of-peak and achieved occupancy per kernel
 
-Run `./run_ncu.sh` first to populate ncu_out/. The figures that come from
-running binaries work even without ncu data.
+Run `./run_ncu.sh` first to populate ncu_out/. The main slide figures
+(bandwidth, arc, passes-law, fit map, rug pull) are in slides/make_figures.py.
 """
 import os, re, subprocess, glob
 import pandas as pd
@@ -19,14 +17,9 @@ import matplotlib.pyplot as plt
 HERE = os.path.dirname(os.path.abspath(__file__))
 FIGS = os.path.join(HERE, "..", "slides", "figs")
 NCU = os.path.join(HERE, "ncu_out")
-DEMO1 = os.path.join(HERE, "..", "demo1_bandwidth")
-DEMO2 = os.path.join(HERE, "..", "demo2_sort")
 os.makedirs(FIGS, exist_ok=True)
 
 ARC = ["v0_naive", "v1_shared", "v2_shuffle", "v3_multiblock", "v4_cub"]
-SHORT = {"v0_naive": "v0\nnaive", "v1_shared": "v1\nshared",
-         "v2_shuffle": "v2\nshuffle", "v3_multiblock": "v3\nbigtile",
-         "v4_cub": "v4\nCUB"}
 
 
 def num(s):
@@ -79,85 +72,9 @@ def parse_ncu():
     return out
 
 
-# ---------- 2. run binaries for headline numbers ----------
-def run_capture(binpath, args, pattern):
-    if not os.path.exists(binpath):
-        return None
-    try:
-        out = subprocess.run([binpath, *args], capture_output=True, text=True,
-                             timeout=120).stdout
-    except Exception:
-        return None
-    m = re.search(pattern, out)
-    return float(m.group(1)) if m else None
-
-
-def fig_demo1():
-    gpu = run_capture(os.path.join(DEMO1, "stream_gpu"), [],
-                      r"copy kernel:\s*([\d.]+)\s*GB/s")
-    cpu_bin = os.path.join(DEMO1, "stream_cpu")
-    cpu = None
-    if os.path.exists(cpu_bin):
-        try:
-            env = dict(os.environ, OMP_NUM_THREADS="6", OMP_PROC_BIND="close",
-                       OMP_PLACES="cores")
-            cmd = (["numactl", "--cpunodebind=0", "--membind=0", cpu_bin]
-                   if subprocess.run(["which", "numactl"],
-                                     capture_output=True).returncode == 0
-                   else [cpu_bin])
-            out = subprocess.run(cmd, capture_output=True, text=True,
-                                 env=env, timeout=120).stdout
-            m = re.search(r"triad bandwidth:\s*([\d.]+)\s*GB/s", out)
-            cpu = float(m.group(1)) if m else None
-        except Exception:
-            pass
-    if gpu is None and cpu is None:
-        print("demo1: no binaries; skipping figure")
-        return
-    labels, vals = [], []
-    if cpu: labels.append("CPU STREAM Triad\n(1 NUMA node, DDR4)"); vals.append(cpu)
-    if gpu: labels.append("GPU copy kernel\n(GDDR6)"); vals.append(gpu)
-    fig, ax = plt.subplots(figsize=(5, 4.2))
-    bars = ax.bar(labels, vals, color=["#888", "#76b900"][:len(vals)])
-    ax.set_ylabel("Achieved bandwidth (GB/s)")
-    ax.set_title("Bandwidth identity: GPU consumes its bus")
-    for b, v in zip(bars, vals):
-        ax.text(b.get_x() + b.get_width()/2, v, f"{v:.0f}", ha="center",
-                va="bottom")
-    if cpu and gpu:
-        ax.text(0.5, 0.92, f"{gpu/cpu:.0f}x", transform=ax.transAxes,
-                ha="center", fontsize=14, color="#76b900", weight="bold")
-    fig.tight_layout()
-    p = os.path.join(FIGS, "fig_demo1_bandwidth.png")
-    fig.savefig(p, dpi=140); print("wrote", p)
-
-
-def fig_demo2_arc(size="26"):
-    runtimes = {}
-    for v in ARC:
-        ms = run_capture(os.path.join(DEMO2, v), [size, "10"],
-                         r"([\d.]+)\s*ms")
-        if ms: runtimes[v] = ms
-    if not runtimes:
-        print("demo2 arc: no binaries; skipping figure")
-        return
-    vs = [v for v in ARC if v in runtimes]
-    ms = [runtimes[v] for v in vs]
-    base = runtimes.get("v0_naive", ms[0])
-    fig, ax = plt.subplots(figsize=(7, 4.2))
-    bars = ax.bar([SHORT[v] for v in vs], ms, color="#76b900")
-    ax.set_ylabel("Kernel-only runtime (ms, log)")
-    ax.set_yscale("log")
-    ax.set_title(f"Sort optimization arc (n=2^{size}, 67M int32)")
-    for b, v in zip(bars, vs):
-        ax.text(b.get_x()+b.get_width()/2, runtimes[v],
-                f"{runtimes[v]:.1f} ms\n{base/runtimes[v]:.1f}x",
-                ha="center", va="bottom", fontsize=9)
-    fig.tight_layout()
-    p = os.path.join(FIGS, "fig_demo2_arc.png")
-    fig.savefig(p, dpi=140); print("wrote", p)
-
-
+# Main slide figures (bandwidth, arc, passes-law, fit map, rug pull) live in
+# slides/make_figures.py. This script owns only the ncu-derived CSV and the
+# per-kernel appendix figure below.
 def fig_demo2_kernels(df):
     if df.empty or "dram_pct" not in df:
         print("demo2 kernels: no ncu data; skipping figure")
@@ -181,7 +98,5 @@ def fig_demo2_kernels(df):
 
 if __name__ == "__main__":
     df = parse_ncu()
-    fig_demo1()
-    fig_demo2_arc()
     fig_demo2_kernels(df)
-    print("done -> slides/figs/")
+    print("done -> slides/figs/ (run make_figures.py for the main slide figures)")
