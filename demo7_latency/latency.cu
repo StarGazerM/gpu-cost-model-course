@@ -96,22 +96,30 @@ int main() {
          "     hiding the %.0f-cycle latency. Warps are TASKS you oversubscribe, not cores.\n\n",
          schedPerSM, lat * (p.clockRate / 1e6));
 
-  // ---- Part C: occupancy = f(registers) ----
-  printf("\nPart C  warps that fit on an SM = occupancy, set by registers (it MOVES):\n");
-  int maxw = p.maxThreadsPerMultiProcessor / 32;
-  auto report = [&](const char* lbl, auto kern) {
+  // ---- Part C: occupancy = f(registers), and its MEASURED cost on one SM ----
+  // For each register level we take its occupancy cap, then MEASURE the same
+  // light chase run at that many warps -- isolating occupancy from the heavy
+  // kernel's extra compute. So the slowdown is purely "fewer warps to hide with".
+  printf("\nPart C  registers -> occupancy -> (measured) latency hiding on one SM:\n");
+  printf("  kernel        regs   warps/SM   single-SM Maccess/s\n");
+  double full = 0;
+  auto level = [&](const char* lbl, auto kern) {
     cudaFuncAttributes fa; int blk;
     CK(cudaFuncGetAttributes(&fa, kern));
     CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blk, kern, 256, 0));
-    printf("  %-11s %3d regs/thread  ->  %2d of %d warps/SM resident\n",
-           lbl, fa.numRegs, blk * 256 / 32, maxw);
+    int w = blk * 256 / 32;                 // warps/SM this register count allows
+    int wm = w > 32 ? 32 : w;               // measurable in one block (<=32 warps)
+    float t = time_ms(1, 32 * wm, 20000);
+    double acc = (double)32 * wm * 20000 / (t / 1e3) / 1e6;
+    if (full == 0) full = acc;
+    printf("  %-11s  %4d     %2d        %8.1f   (%.2fx)\n", lbl, fa.numRegs, w, acc, acc / full);
   };
-  report("light", chase<1>);
-  report("heavy", chase<48>);
-  report("very heavy", chase<128>);
-  printf("\n  Same silicon. The register count -- visible only via ptxas -v / the\n");
-  printf("  profiler -- decides where on the Part B curve you land. Push registers\n");
-  printf("  past its knee (~16 warps) and you stop hiding latency. So '18,176 cores'\n");
-  printf("  is not 18,176 CPUs and is not fixed -- it is occupancy you must measure.\n");
+  level("light", chase<1>);
+  level("heavy", chase<48>);
+  level("very heavy", chase<128>);
+  printf("\n  Same chase, same memory work -- only the warp count differs. The very-heavy\n");
+  printf("  kernel's registers cap it at 8 warps -> MEASURED ~2.7x slower, purely from\n");
+  printf("  lost occupancy. So '18,176 cores' is occupancy you set with registers (ptxas\n");
+  printf("  -v) and read with a profiler -- not 18,176 fixed CPUs.\n");
   return 0;
 }

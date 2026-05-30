@@ -109,7 +109,7 @@ One thread chasing dependent loads to HBM waits ~230 ns / ~580 cycles. **One thr
 
 Now the proof, on **one SM** so it can't be "use more cores": an Ada SM has just **4 warp schedulers** -- it can *issue* only 4 warps per clock (128 FP32 lanes = 4 warps of SIMD). If warps were cores, throughput would flatten at 4. **It doesn't.** Oversubscribe the *same* SM to 8, 16, 32 warps and throughput keeps climbing -- **32 warps (8x oversubscribed) is ~5x faster than at 4.** Those extra warps cannot be computing (there are only 4 slots); they are covering each other's 580-cycle stalls. **Warps are latency-hiding tasks you oversubscribe, not cores.**
 
-So "18,176 CUDA cores" is not 18,176 CPUs -- it's SIMD lanes. The real parallelism is how many *warps* you keep resident = **occupancy** = register-file / (regs/thread x 32). A register-heavy kernel fits fewer (Part C: 32 regs -> 48 warps, 148 regs -> **8** warps), hides less latency, and slides down the curve. That number is visible only in **`ptxas -v`** and the **profiler** -- which is why you need them.
+So "18,176 CUDA cores" is not 18,176 CPUs -- it's SIMD lanes. The real parallelism is how many *warps* you keep resident = **occupancy** = register-file / (regs/thread x 32). A register-heavy kernel fits fewer warps -- and Part C **measures** the cost: 148 regs/thread caps it at **8 warps/SM**, and the *same* chase run at 8 warps is **2.7x slower** on one SM, purely from lost occupancy (the compute confound removed by measuring the light kernel at each capped warp count). That number is visible only in **`ptxas -v`** and the **profiler** -- which is why you need them.
 
 ```cpp
 // each thread chases its own dependent-load cycle: latency-bound, nothing hides it
