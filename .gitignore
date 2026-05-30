@@ -42,3 +42,4 @@ thrust_compare
 merge_ablation
 latency
 divergence
+warp_sort

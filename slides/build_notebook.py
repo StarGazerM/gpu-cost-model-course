@@ -33,7 +33,7 @@ md(r"""
 | 0 | Thesis + hardware | 3 |
 | 1 | Bandwidth identity | 4 |
 | 2 | **Latency & how the GPU hides it** (concurrency) | 6 |
-| 2b | **A thread is also a SIMD lane** (divergence) | 4 |
+| 2b | **A thread is also a SIMD lane** (divergence trap + shuffle-sort tool) | 5 |
 | 3 | Cache cliff (measure at GB) | 4 |
 | 4 | **Cost model in two lines** (thrust dispatch) | 5 |
 | 5 | Two sorts (framing) | 2 |
@@ -76,7 +76,8 @@ sh("make -s -C demo1_bandwidth; make -s -C demo2_sort; make -s -C demo3_rugpull"
 sh("cd demo6_mergesort && nvcc -O3 -std=c++17 -arch=sm_89 -o cub_compare cub_compare.cu && "
    "nvcc -O3 -std=c++17 -arch=sm_89 -o thrust_compare thrust_compare.cu")
 sh("cd demo7_latency && nvcc -O3 -std=c++17 -arch=sm_89 -o latency latency.cu")
-sh("cd demo8_divergence && nvcc -O3 -std=c++17 -arch=sm_89 -o divergence divergence.cu")
+sh("cd demo8_divergence && nvcc -O3 -std=c++17 -arch=sm_89 -o divergence divergence.cu && "
+   "nvcc -O3 -std=c++17 -arch=sm_89 -o warp_sort warp_sort.cu")
 print("built.")
 """)
 
@@ -194,7 +195,30 @@ plt.show()
 """)
 
 md(r"""
-This is the leaky abstraction CUDA's language papers over: a "thread" is **sometimes an independent task** (when enough warps hide latency -- section 2) and **sometimes a SIMD lane** (when the warp moves in lockstep -- here). "Parallelism" is sometimes *simultaneous* (independent warps) and sometimes *hidden* (one stalls, another runs). You write the same scalar per-thread code for both -- and you must know which it actually is. (It is also *why* the per-thread sort in 5b is a branchless **network**: to never pay this tax.)
+This is the leaky abstraction CUDA's language papers over: a "thread" is **sometimes an independent task** (when enough warps hide latency -- section 2) and **sometimes a SIMD lane** (when the warp moves in lockstep -- here). "Parallelism" is sometimes *simultaneous* (independent warps) and sometimes *hidden* (one stalls, another runs). You write the same scalar per-thread code for both -- and you must know which it actually is.
+""")
+
+md(r"""
+**Lockstep isn't only a tax -- it's also a tool.** If 32 lanes always run the same instruction, then a lane can *read a neighbour lane's register directly* with a shuffle (`__shfl_xor`) -- no shared memory, no `__syncthreads`, no `if`. The lanes stop being a hazard and start **cooperating**: they run a fixed sorting **network** (branchless min/max compare-exchanges on a data-oblivious schedule), so every lane executes the identical instruction stream and the lockstep is free.
+
+Below, 32 lanes sort their 32 values using *only* register-to-register shuffles. This is exactly the per-thread sorting network you'll see in §5b (`net_sort`) -- but turned **sideways, across the warp's lanes** instead of across one thread's registers.
+
+```cpp
+__device__ int warp_bitonic_sort(int v) {          // each lane holds ONE value v
+  int lane = threadIdx.x & 31;
+  for (int k = 2; k <= 32; k <<= 1)
+    for (int j = k >> 1; j > 0; j >>= 1) {
+      int partner = __shfl_xor_sync(0xffffffffu, v, j);   // read lane^j's register
+      bool keep_min = ((lane & j) == 0) == ((lane & k) == 0);
+      v = keep_min ? min(v, partner) : max(v, partner);    // branchless -> no divergence
+    }
+  return v;                                          // warp's 32 values now sorted
+}
+```
+""")
+
+code(r"""
+print(sh("./warp_sort", cwd=f"{ROOT}/demo8_divergence"))
 """)
 
 # ----------------------------------------------------------------------------
@@ -344,7 +368,7 @@ template <int IPT> __global__ void block_sort(int* g, ...) {
 // IPT=16: 16 keys sorted per thread in registers before any shared/global trip.
 ```
 
-**What `net_sort` is** (the per-thread sort): a **sorting network** -- a *fixed*, branchless sequence of compare-exchanges that sorts a small set. It is **data-oblivious** (the very same comparisons run regardless of the values), so there are no branches; all 32 lanes of a warp execute it in **lockstep with zero divergence**, each sorting its own registers. A normal comparison sort's `if`s would make lanes diverge and serialize; a network never does -- which is *why* it's the right per-thread sort on a SIMD machine.
+**What `net_sort` is** (the per-thread sort): the **same sorting network we met in §2b** -- a *fixed*, branchless sequence of min/max compare-exchanges -- but now run *down one thread's `IPT` registers* instead of *across the warp's 32 lanes*. It is **data-oblivious** (the very same comparisons run regardless of the values), so there are no branches; all 32 lanes of a warp execute it in **lockstep with zero divergence**, each sorting its own registers. A normal comparison sort's `if`s would make lanes diverge and serialize; a network never does -- which is *why* it's the right per-thread sort on a SIMD machine. (§2b's `__shfl` version and this register version are the same idea on the two faces of a thread.)
 
 ```cpp
 // odd-even sorting network on IPT registers: branchless compare-exchanges only
