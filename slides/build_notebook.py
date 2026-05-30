@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Generate course.ipynb -- the narrative spine that weaves the four demos.
+"""Generate course.ipynb -- the cost-model-first spine, woven from measured demos.
 
-Run:  python3 slides/build_notebook.py   (writes ../course.ipynb)
+Run:  python3 slides/build_notebook.py            (writes ../course.ipynb)
 Then: jupyter nbconvert --to notebook --execute --inplace course.ipynb
 
-The notebook runs the fast demos live (bandwidth, sort arc, rug pull) and loads
-pre-generated artifacts for the slow ones (ncu stall table, SASS diff), so it
-executes end-to-end in well under a minute.
+Runs the fast/medium demos live; loads pre-generated artifacts (SASS) where a
+live run would be slow. Executes end-to-end in a couple of minutes.
 """
 import os
 import nbformat as nbf
@@ -18,221 +17,216 @@ def code(s): cells.append(nbf.v4.new_code_cell(s.strip("\n")))
 
 # ----------------------------------------------------------------------------
 md(r"""
-# GPGPU in one hour — the demos, woven together
+# GPU programming is cost-model first
 
-A 1-hour course for database & systems researchers. Every claim here is **measured on this machine**, not asserted. This notebook is the spine: it runs each demo and renders the numbers inline so the four theses land by evidence.
+A 1-hour course for database & systems researchers. One thesis, proven by measurement on the hardware in front of us:
 
-**Hardware reality.** The design spec targets H100/4090; this box has a single **RTX 6000 Ada** (sm_89, AD102, 48 GB **GDDR6** ≈ 960 GB/s, 96 MB L2, register file ≈ 36 MB) and an AMD Threadripper PRO 5945WX (DDR4-3200, NPS2). So "HBM" reads as GDDR6, and Demo 4's live hardware swap becomes a compile-time SASS diff. Everything else holds.
+> **You don't pick an algorithm and then make the chip run it. You compute the cost model first -- bytes moved, passes over memory, arithmetic intensity, where the data lives, how you access it -- and *that* selects the algorithm before you write a line.** Asymptotic optimality is not hardware-neutral; "best" is a function of the chip.
 
-**The four theses (each demo must viscerally land at least one):**
-1. A GPU is a **memory hierarchy with compute attached**, not "many cores." Bandwidth is its identity.
-2. Per-core compute is mid; **per-memory-hierarchy** the GPU is a different *kind* of object.
-3. **Kernel writing is ~10%** of GPU programming. Allocation, async, library composition are the rest.
-4. The standard CUDA model is a **fiction** — the real chip exposes more than the model captures.
+**The chip:** a single **RTX 6000 Ada** (sm_89, AD102) -- 48 GB **GDDR6** ~960 GB/s, **96 MB L2**, register file ~36 MB. A bandwidth machine with a large automatic cache, bolted to a massively parallel engine. Everything below is measured on it.
+
+**The spine:** two sorts tell the whole story from two angles --
+- **radix** = *massive parallelism collapses the algorithm; linear-time wins*,
+- **merge** = *the cache / access-pattern / memory-hierarchy story* --
+and a production library is just a **frozen cost-model decision tree** that picks between them for you.
 """)
 
 code(r"""
 %matplotlib inline
 import subprocess, re, os
-import pandas as pd
 import matplotlib.pyplot as plt
 
 ROOT = os.getcwd()
-GREEN, GREY, RED = "#76b900", "#888888", "#c0392b"
+GPU, CPU, RADIX, MERGE, INK, CEIL = "#76b900", "#5b6770", "#0b84a5", "#c0392b", "#23272b", "#b9bfc4"
+plt.rcParams.update({"figure.dpi": 130, "axes.spines.top": False, "axes.spines.right": False,
+                     "axes.grid": True, "grid.color": "#eef1f3", "axes.axisbelow": True})
 
 def sh(cmd, cwd=None, timeout=900):
-    r = subprocess.run(cmd, shell=True, cwd=cwd or ROOT,
-                       capture_output=True, text=True, timeout=timeout)
+    r = subprocess.run(cmd, shell=True, cwd=cwd or ROOT, capture_output=True, text=True, timeout=timeout)
     return r.stdout + r.stderr
 
 def grab(text, pat):
-    m = re.search(pat, text)
-    return float(m.group(1)) if m else float("nan")
+    m = re.search(pat, text); return float(m.group(1)) if m else float("nan")
 
-print(sh("make all")[-200:] or "binaries up to date")
+# build everything the notebook runs
+sh("make -s -C demo1_bandwidth; make -s -C demo2_sort; make -s -C demo3_rugpull; make -s -C demo5_histogram")
+sh("cd demo6_mergesort && nvcc -O3 -std=c++17 -arch=sm_89 -o cub_compare cub_compare.cu && "
+   "nvcc -O3 -std=c++17 -arch=sm_89 -o thrust_compare thrust_compare.cu")
+print("built.")
 """)
 
 # ----------------------------------------------------------------------------
 md(r"""
-## Demo 1 — Bandwidth identity  *(thesis 1 & 2)*
+## 1. The chip's identity is bandwidth
 
-A trivial streaming copy. The CPU's STREAM Triad tops out at ~60–75% of its (small) DRAM peak — limited by outstanding misses, not compute. The GPU's copy kernel saturates its (much larger) bus by design. The story is the **ratio**, and that the GPU number comes from a kernel you could write in your sleep.
+A trivial streaming copy. The CPU's STREAM Triad tops out well below its (small) DRAM peak; the GPU's copy kernel saturates its (much larger) bus. The story is the *ratio*, and that the GPU number comes from a kernel you could write in your sleep.
 """)
-
 code(r"""
-gpu_out = sh("./stream_gpu", cwd=f"{ROOT}/demo1_bandwidth")
+g = grab(sh("./stream_gpu", cwd=f"{ROOT}/demo1_bandwidth"), r"copy kernel:\s*([\d.]+)")
 numa = "numactl --cpunodebind=0 --membind=0 " if sh("which numactl").strip() else ""
-cpu_out = sh(f"OMP_NUM_THREADS=6 OMP_PROC_BIND=close OMP_PLACES=cores {numa}./stream_cpu",
-             cwd=f"{ROOT}/demo1_bandwidth")
-print(gpu_out.strip()); print(); print(cpu_out.strip())
-
-gpu = grab(gpu_out, r"copy kernel:\s*([\d.]+)")
-cpu = grab(cpu_out, r"triad bandwidth:\s*([\d.]+)")
+c = grab(sh(f"OMP_NUM_THREADS=6 OMP_PROC_BIND=close OMP_PLACES=cores {numa}./stream_cpu",
+            cwd=f"{ROOT}/demo1_bandwidth"), r"triad bandwidth:\s*([\d.]+)")
 fig, ax = plt.subplots(figsize=(5, 4))
-ax.bar(["CPU STREAM Triad\n(1 NUMA node, DDR4)", "GPU copy kernel\n(GDDR6)"],
-       [cpu, gpu], color=[GREY, GREEN])
-ax.set_ylabel("Achieved bandwidth (GB/s)")
-ax.set_title(f"GPU consumes its bus — {gpu/cpu:.0f}x")
-for i, v in enumerate([cpu, gpu]):
-    ax.text(i, v, f"{v:.0f}", ha="center", va="bottom", fontweight="bold")
+ax.bar(["CPU STREAM Triad\nDDR4, 1 NUMA node", "GPU copy\nGDDR6"], [c, g], color=[CPU, GPU])
+ax.set_ylabel("Achieved GB/s"); ax.set_title(f"Bandwidth is the chip's identity -- {g/c:.0f}x")
+for i, v in enumerate([c, g]): ax.text(i, v, f"{v:.0f}", ha="center", va="bottom", fontweight="bold")
 plt.show()
 """)
 
 # ----------------------------------------------------------------------------
 md(r"""
-## Demo 2 — The sort optimization arc  *(the centerpiece, thesis 1→3)*
+## 2. ...but the cache hides it -- so measure at GB scale
 
-Bitonic sort is the teaching vehicle (data-oblivious, maps cleanly to shared memory and warp shuffles). **Production GPU sort is radix (CUB)** — v4 makes that explicit.
+Run the *same naive sort kernel* across sizes. Below 96 MB the array lives in L2 and throughput is ~4x higher than reality; cross the L2 and you fall off a cliff to true HBM-bound speed.
 
-### 2a. First, the cache cliff — *why size matters*
-
-Before any optimization: run the naive v0 across sizes. Cross the **96 MB L2** and throughput falls off a cliff. The same code, the same chip — the only thing that changed is whether the array fits in cache. *That* is thesis 1, before we write a single optimization. It's also why the arc runs at 2^26 (256 MB): so we measure HBM, not L2.
+Two lessons in one plot: (a) the memory hierarchy is the chip; (b) **any benchmark that fits in cache is lying to you** -- everything past here runs at >= 1 GB.
 """)
-
 code(r"""
 sizes = [24, 25, 26, 27]
-mk = [grab(sh(f"./v0_naive {L} 5", cwd=f"{ROOT}/demo2_sort"), r"([\d.]+)\s*Mkeys/s")
-      for L in sizes]
-x = list(range(len(sizes)))
-fig, ax = plt.subplots(figsize=(6.5, 4))
-ax.plot(x, mk, "o-", color=GREEN, lw=2)
-ax.axvspan(-0.3, 0.5, color="orange", alpha=0.15)
-ax.text(0, mk[0], "  fits in\n  96 MB L2", va="center", color="#b06000")
-ax.set_xticks(x); ax.set_xticklabels([f"2^{s}\n{2**s*4//10**6} MB" for s in sizes])
-ax.set_ylabel("v0 throughput (Mkeys/s)")
-ax.set_title("The L2 cache cliff: same code, ~4x slower once you exit L2")
+mk = [grab(sh(f"./v0_naive {s} 5", cwd=f"{ROOT}/demo2_sort"), r"([\d.]+)\s*Mkeys/s") for s in sizes]
+fig, ax = plt.subplots(figsize=(6.2, 4))
+x = range(len(sizes))
+ax.plot(x, mk, "o-", color=GPU, lw=2.5, ms=9, mfc="white", mew=2)
+ax.axvspan(-0.4, 0.5, color="#ffe7c2", alpha=0.7)
+ax.text(0, mk[0], "  fits in\n  96 MB L2", va="top", color="#a85b00", fontweight="bold")
+ax.set_xticks(list(x)); ax.set_xticklabels([f"$2^{{{s}}}$\n{2**s*4//10**6} MB" for s in sizes])
+ax.set_ylabel("throughput (Mkeys/s)"); ax.set_title("The cache cliff: a sub-L2 benchmark lies")
 plt.show()
-print("Mkeys/s by size:", {f"2^{s}": round(v) for s, v in zip(sizes, mk)})
-""")
-
-md(r"""
-### 2b. The arc — v0 → v4
-
-Each step is one idea, measured on the identical 2^26 array (all verified against `std::sort`):
-
-| step | idea | teaching point |
-|---|---|---|
-| **v0** | every stage in global memory | naive parallelism is bandwidth-*naive* |
-| **v1** | small-stride stages in **shared memory** | the programmable scratchpad is the GPU's signature |
-| **v2** | innermost stages via **warp shuffle** | the register file is your fastest memory (and you can address a neighbor's) |
-| **v3** | bigger tile → **fewer global passes** | grid-level structure is where it gets architecturally interesting |
-| **v4** | **CUB radix** | production GPU code is library composition, not kernel writing |
-
-The real lever on a bandwidth machine: **how many times you stream the array.** v0 ≈ 351 passes, v3 ≈ 104 (the bitonic roofline), CUB ≈ 4–8.
-""")
-
-code(r"""
-ARC = ["v0_naive", "v1_shared", "v2_shuffle", "v3_multiblock", "v4_cub"]
-LAB = {"v0_naive": "v0\nnaive", "v1_shared": "v1\nshared", "v2_shuffle": "v2\nshuffle",
-       "v3_multiblock": "v3\nbigtile", "v4_cub": "v4\nCUB"}
-ms = {v: grab(sh(f"./{v} 26 10", cwd=f"{ROOT}/demo2_sort"), r"([\d.]+)\s*ms") for v in ARC}
-base = ms["v0_naive"]
-fig, ax = plt.subplots(figsize=(7.5, 4.2))
-bars = ax.bar([LAB[v] for v in ARC], [ms[v] for v in ARC], color=GREEN)
-ax.set_yscale("log"); ax.set_ylabel("kernel-only runtime (ms, log)")
-ax.set_title("Sort arc @ 2^26 (67M int32) — all PASS vs std::sort")
-for v, b in zip(ARC, bars):
-    ax.text(b.get_x()+b.get_width()/2, ms[v], f"{ms[v]:.1f} ms\n{base/ms[v]:.0f}x",
-            ha="center", va="bottom", fontsize=8)
-plt.show()
-""")
-
-md(r"""
-### 2c. v2's win is invisible on the stopwatch — and obvious in the profiler
-
-v2 (warp shuffle) is ~flat in wall-clock: it speeds up the shared-memory `local_merge` but that's only ~14% of the time — the wide-stride `global_stage` passes dominate. This is **Amdahl's law, live**: you optimized something real, but not the bottleneck, and the profiler proves both halves of that sentence. (Loaded from `run_ncu.sh` output.)
-""")
-
-code(r"""
-csv = f"{ROOT}/slides/figs/sort_kernel_metrics.csv"
-if os.path.exists(csv):
-    d = pd.read_csv(csv)
-    lm = d[d.kernel.str.contains("local_merge")].copy()
-    cols = ["version", "dur_ms", "dram_pct", "occ_pct", "stall_shared", "stall_barrier"]
-    lm = lm[[c for c in cols if c in lm.columns]].reset_index(drop=True)
-    print("local_merge kernel — v1 vs v2 vs v3 (warp shuffle cuts shared + barrier stalls):")
-    display(lm.round(2))
-else:
-    print("Run:  cd profile && ./run_ncu.sh && python3 extract_metrics.py")
 """)
 
 # ----------------------------------------------------------------------------
 md(r"""
-## Demo 3 — The rug pull  *(thesis 3: the kernel is 10%)*
+## 3. The cost model, in two lines of user code
 
-Take the best hand-rolled sort (v3) and wrap it the way a query stage actually appears in a pipeline: allocate, copy in, sort, copy out, free — every iteration. The kernel never changes. Watch what the *orchestration* costs, and how `cudaMallocAsync` (a memory pool) and a CUDA graph claw it back.
+The highest-level GPU sort API -- `thrust::sort`, the `std::sort` equivalent -- *already* embodies the thesis. Its dispatch (`thrust/system/cuda/detail/sort.h`, `can_use_primitive_sort`) picks at **compile time**:
+
+```cpp
+// arithmetic key (int/float...) AND default less/greater  -> RADIX  (cub::DeviceRadixSort)
+// custom comparator, or non-arithmetic key                -> MERGE  (cub::DeviceMergeSort)
+```
+
+So these two calls sort the *same data into the same order* -- the only difference is a comparator whose type happens to mean `a < b` -- yet one is several times slower, because its type blocks the radix path. **The cost model, triggered by a type, invisible to the user.**
+""")
+code(r"""
+out = sh("./thrust_compare 28 6", cwd=f"{ROOT}/demo6_mergesort"); print(out)
+r = grab(out, r"-> radix :\s*([\d.]+)"); m = grab(out, r"-> merge :\s*([\d.]+)")
+fig, ax = plt.subplots(figsize=(6, 4))
+ax.bar(["thrust::sort(x)\n-> radix", "thrust::sort(x, MyLess())\n-> merge"], [r, m], color=[RADIX, MERGE])
+ax.set_ylabel("ms (2^28 keys)"); ax.set_title(f"One custom comparator costs {m/r:.1f}x -- the cost model, by type")
+for i, v in enumerate([r, m]): ax.text(i, v, f"{v:.1f}", ha="center", va="bottom", fontweight="bold")
+plt.show()
 """)
 
+# ----------------------------------------------------------------------------
+md(r"""
+## 4. Two sorts, two truths about the chip
+
+Why ship *both*? Because there's no single best sort -- the cost model picks the game. The two algorithms illuminate the two halves of "what is a GPU."
+
+### 4a. Radix -- *massive parallelism collapses the algorithm; linear time wins*
+
+On a CPU you're taught O(n log n) comparison sort is optimal and you ignore radix for its constants. The GPU inverts the cost model: with near-perfect data-parallelism the per-element work is free, so **only passes over memory count** -- and O(n)-pass radix beats O(n log n) merge. First, the naive-to-radix arc (bitonic is just the bad global-memory baseline that motivates it); then radix vs a *fully optimized* CUB merge at GB scale.
+""")
+code(r"""
+# the arc: naive global bitonic -> shared -> bigger tile -> CUB radix (2^26)
+ARC = [("v0_naive","v0 naive"),("v1_shared","v1 shared"),("v3_multiblock","v3 big-tile"),("v4_cub","v4 CUB radix")]
+ms = {lbl: grab(sh(f"./{b} 26 10", cwd=f"{ROOT}/demo2_sort"), r"([\d.]+)\s*ms") for b, lbl in ARC}
+base = ms["v0 naive"]
+fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4))
+bars = a1.bar(list(ms), list(ms.values()), color=[GPU, GPU, GPU, RADIX]); a1.set_yscale("log")
+a1.set_ylabel("kernel-only ms (log)"); a1.set_title("Hand-tuning has a low ceiling; the algorithm wins")
+for b, v in zip(bars, ms.values()): a1.text(b.get_x()+b.get_width()/2, v, f"{base/v:.0f}x", ha="center", va="bottom", fontsize=9)
+a1.tick_params(axis="x", labelsize=8)
+# radix vs fully-optimized CUB merge at GB scale
+out = sh("./cub_compare 28 6", cwd=f"{ROOT}/demo6_mergesort")
+cm = grab(out, r"merge sort :\s*([\d.]+)"); cr = grab(out, r"radix sort :\s*([\d.]+)")
+a2.bar(["CUB merge", "CUB radix"], [cm, cr], color=[MERGE, RADIX]); a2.set_ylabel("ms (2^28, 1 GB)")
+a2.set_title(f"Even world-class merge gives up {cm/cr:.1f}x to radix")
+for i, v in enumerate([cm, cr]): a2.text(i, v, f"{v:.0f}", ha="center", va="bottom", fontweight="bold")
+plt.tight_layout(); plt.show()
+""")
+
+md(r"""
+### 4b. Merge -- *the cache / access-pattern / memory-hierarchy story*
+
+Merge is the **general** sort (any comparator, where radix can't go), and its CUB implementation is pure hierarchy choreography -- you don't change the algorithm, you change *where the data lives and how you touch it*:
+- **per-thread register sorting-networks** (`StableOddEvenSort` on `keys[ITEMS_PER_THREAD]`),
+- **shared-memory merge tiles** with **`MergePath` co-rank** to make the merge parallel and coalesced,
+- **device-level merge** of tiles, again partitioned by MergePath.
+
+The honest open question (the live deep-dive): on this hardware, does *gradually tuning* those layers climb, or has the big L2 + fast shared atomics flattened the middle of the arc? That's an **ablation** -- start from CUB's final code, remove one optimization at a time -- still to be run. (What we *do* know: the fully-tuned result is the `CUB merge` bar above, and radix still beats it 4x.)
+""")
+
+# ----------------------------------------------------------------------------
+md(r"""
+## 5. The kernel is ~10%
+
+Take the best hand-rolled sort and wrap it the way a query stage actually runs: allocate, copy in, sort, copy out, free -- every iteration. The kernel never changes, yet per-iteration time swings wildly. `cudaMalloc`/`cudaFree` are synchronous driver calls; a stream-ordered pool (`cudaMallocAsync`) and a CUDA graph claw the time back -- none of it by touching the kernel.
+""")
 code(r"""
 H = ["naive", "pool", "graph"]
 outs = {h: sh(f"./{h}_harness 20 200", cwd=f"{ROOT}/demo3_rugpull") for h in H}
 pit = {h: grab(outs[h], r"per-iter\s*:\s*([\d.]+)") for h in H}
 kon = grab(outs["naive"], r"kernel-only\s*:\s*([\d.]+)")
-for h in H: print(outs[h].strip().splitlines()[0])
-
-fig, ax = plt.subplots(figsize=(6.5, 4))
-labels = ["kernel\nonly", "naive\nmalloc", "pool\nmallocAsync", "graph\ncapture"]
-vals = [kon, pit["naive"], pit["pool"], pit["graph"]]
-ax.bar(labels, vals, color=[GREY, RED, GREEN, GREEN])
-ax.set_ylabel("per-iteration time (ms)")
-ax.set_title("Same kernel, three harnesses (n=2^20)")
-for i, v in enumerate(vals):
-    ax.text(i, v, f"{v:.3f}", ha="center", va="bottom", fontsize=9)
+fig, ax = plt.subplots(figsize=(6.2, 4))
+ax.bar(["kernel\nonly", "naive\nmalloc", "pool\nmallocAsync", "graph"], [kon, pit["naive"], pit["pool"], pit["graph"]],
+       color=[CPU, MERGE, GPU, GPU])
+ax.set_ylabel("per-iteration ms"); ax.set_title("Same kernel, three harnesses -- the kernel is ~10%")
+for i, v in enumerate([kon, pit["naive"], pit["pool"], pit["graph"]]): ax.text(i, v, f"{v:.2f}", ha="center", va="bottom", fontsize=9)
 plt.show()
-
-st_n = f"{ROOT}/profile/nsys_out/stats_naive.txt"
-st_p = f"{ROOT}/profile/nsys_out/stats_pool.txt"
-if os.path.exists(st_n) and os.path.exists(st_p):
-    def api_avg(path, name):
-        for ln in open(path):
-            if name in ln:
-                nums = re.findall(r"[\d,]+\.?\d*", ln)
-                return ln.strip()
-        return None
-    print("\nnsys CUDA-API time (the driver round-trip is the villain):")
-    print("  naive :", api_avg(st_n, "cudaMalloc"))
-    print("  pool  :", api_avg(st_p, "cudaMallocAsync"))
 """)
 
 # ----------------------------------------------------------------------------
 md(r"""
-## Demo 4 — The chip is bigger than the model  *(thesis 4)*
+## 6. The model is a fiction
 
-Only one GPU here, so no live hardware swap. The compile-time version is arguably sharper: take the **same source** and compile it for Ada (sm_89) and Hopper (sm_90). The machine code differs — ptxas exploits instructions that don't exist on the older arch. You wrote `min()/max()`; on Hopper it becomes `VIMNMX`. CUB goes further and **ships entirely different kernels per architecture**, emitting Hopper *collective* instructions the CUDA C model never surfaces.
-
-What we *can't* show without the hardware: live Hopper bandwidth/occupancy, and anything using TMA/DSMEM/clusters (those would appear only in this disassembly, never run). (Loaded from `demo4_hwswap/run_all.sh` output.)
+One GPU here, so no live hardware swap. The compile-time version is sharper: the *same source* compiles to different machine code per architecture, because `ptxas` exploits arch-specific instructions. You write `min/max`; on Hopper it becomes `VIMNMX`. CUB goes further and ships per-arch kernels emitting Hopper *collective* instructions the CUDA C model never surfaces. (Loaded from `demo4_hwswap/run_all.sh`.)
 """)
-
 code(r"""
 so = f"{ROOT}/demo4_hwswap/sass_out"
 if os.path.isdir(so) and os.path.exists(f"{so}/v3_multiblock_ops90.txt"):
-    for v, note in [("v3_multiblock", "our hand-rolled sort"), ("v4_cub", "CUB radix")]:
-        a = set(open(f"{so}/{v}_ops89.txt").read().split())
-        b = set(open(f"{so}/{v}_ops90.txt").read().split())
-        print(f"{v}  ({note})")
-        print(f"   sm_90-only opcodes: {', '.join(sorted(b - a))}")
-        print(f"   sm_89-only opcodes: {', '.join(sorted(a - b))}\n")
+    for v in ["v3_multiblock", "v4_cub"]:
+        a = set(open(f"{so}/{v}_ops89.txt").read().split()); b = set(open(f"{so}/{v}_ops90.txt").read().split())
+        print(f"{v}: sm_90-only opcodes -> {', '.join(sorted(b - a))}")
 else:
-    print("Run:  cd demo4_hwswap && ./run_all.sh")
+    print("Run:  cd demo4_hwswap && ./run_all.sh   (then re-run this cell)")
 """)
 
 # ----------------------------------------------------------------------------
 md(r"""
-## Closing — the four theses, by the numbers
+## 7. Supporting demo: histogram = the contention story (and "high-card -> just sort")
 
-- **Bandwidth is identity.** A trivial copy hit ~84% of GDDR6 peak; the CPU, tuned, reached its DRAM ceiling at a fraction of the absolute number. *(Demo 1)*
-- **The GPU is a different kind of object per memory hierarchy.** The cache cliff, the scratchpad, the register-file shuffle — the whole sort arc was memory-hierarchy engineering, not "more cores." *(Demo 2)*
-- **The kernel is ~10%.** A fully-tuned kernel, wrapped naively, lost most of its speed to allocation and orchestration — recovered by a memory pool and a graph, not by touching the kernel. *(Demo 3)*
-- **The model is a fiction.** The same source compiled to different machine code per architecture; the library shipped per-arch kernels using instructions the model doesn't expose. *(Demo 4)*
+A histogram reads N keys once, trivial compute -> arithmetic intensity ~0.5 ops/byte, deeply memory-bound, floor = bytes/bandwidth (~1.1 ms for 1 GB). The lesson is *whether you reach that floor*:
+- **naive global atomics**: ~2% of peak -- not bandwidth-bound, **atomic-contention-bound** (the bus sits idle while warps stall on serialized atomics).
+- **shared-memory privatization**: ~92% -- at the roofline.
 
-And the through-line: **on a bandwidth machine, sorting performance is the number of times you stream the array.** v0 streamed it ~351×; CUB ~4–8×. Everything in between was learning to stream it fewer times.
+The controlled experiment (`v1b`, privatize in *global* memory) showed ~19x of that win is **contention reduction**, only ~2.5x is shared memory -- *measure, don't assume which fix mattered*. And at high cardinality privatization can't fit, atomics plateau, and the right answer becomes... **sort + run-length-encode**. Histogram = sort + a pass; the primitive underneath is sort.
+""")
+code(r"""
+v0 = sh("./v0_global_atomic 28 5 0", cwd=f"{ROOT}/demo5_histogram")
+v1 = sh("./v1_shared_privatized 28 5 0", cwd=f"{ROOT}/demo5_histogram")
+p0 = grab(v0, r"\(\s*([\d.]+)% peak\)"); p1 = grab(v1, r"\(\s*([\d.]+)% peak\)")
+print(v0.strip()); print(v1.strip())
+fig, ax = plt.subplots(figsize=(5.6, 4))
+ax.bar(["global atomics\n(contention-bound)", "shared privatized\n(at roofline)"], [p0, p1], color=[MERGE, GPU])
+ax.axhline(100, ls="--", color=CEIL); ax.set_ylabel("% of bandwidth peak"); ax.set_ylim(0, 110)
+ax.set_title("Histogram: 1 idea (privatize) -> 2% to 92% of peak")
+for i, v in enumerate([p0, p1]): ax.text(i, v, f"{v:.0f}%", ha="center", va="bottom", fontweight="bold")
+plt.show()
+""")
+
+# ----------------------------------------------------------------------------
+md(r"""
+## Closing: the library is a frozen cost-model decision tree
+
+Everything pointed one way. `thrust::sort` picks radix-vs-merge by *type*, at compile time. CUB ships *both* sorts and *both* a `BLOCK_HISTO_ATOMIC` and a `BLOCK_HISTO_SORT`. The experts didn't find *the* answer -- they encoded the **question** and a chooser, because the right choice is a function of the input and the chip.
+
+So the one sentence the audience should leave with: **compute the cost model first.** Bytes moved, passes, arithmetic intensity, where the data lives, how you access it -- that arithmetic selects the algorithm, tells you when to stop tuning, and tells you which library call to make. On a GPU, that is the program; the kernel is a detail.
 """)
 
 nb["cells"] = cells
-nb["metadata"] = {
-    "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
-    "language_info": {"name": "python"},
-}
+nb["metadata"] = {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+                  "language_info": {"name": "python"}}
 out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "course.ipynb")
 with open(out, "w") as f:
     nbf.write(nb, f)
