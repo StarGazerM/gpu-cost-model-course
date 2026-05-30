@@ -103,38 +103,37 @@ plt.show()
 md(r"""
 ## 2. The hidden half: latency, and how the GPU hides it  (~6 min)
 
-> **Demo** `demo7_latency` &middot; **in:** a 1 GB int array wired as one random permutation cycle (the chase) + a 1 GB copy buffer &middot; **out:** ns per access, and a bandwidth-vs-warp-count curve &middot; **algorithm:** single-thread dependent-load pointer chase (raw latency), then the copy kernel swept over warp counts (hiding) &middot; **why:** isolate latency with one thread, then show bandwidth IS hidden latency -- this is what motivates concurrency/occupancy.
+> **Demo** `demo7_latency` &middot; **in:** a 1 GB int array wired as one random permutation cycle &middot; **out:** raw latency, single-SM throughput vs warps, and warps/SM vs register usage &middot; **algorithm:** per-thread dependent-load pointer chase, run on ONE SM with 1..32 warps, then with register-heavy variants &middot; **why:** *prove* latency hiding (not "more cores") is what makes the GPU fast, and that the parallelism is *occupancy* -- set by registers, not silicon.
 
-That bandwidth is **not free** -- it's *hidden latency*. The GPU's per-access latency is **bad**: a single thread chasing dependent loads to HBM waits hundreds of ns / hundreds of cycles per access -- worse than a CPU cache. **One GPU thread is slow.**
+The GPU's per-access latency is **bad**: one thread chasing dependent loads to HBM waits ~230 ns / ~580 cycles. **One thread is slow.**
 
-The trick is **concurrency**: oversubscribe with thousands of warps; when one stalls on a load, the scheduler switches to a ready one in *zero cycles* (every warp's state lives in the register file). Bandwidth is simply what you get once enough warps are in flight to cover every stall. Watch the *same copy kernel* climb from a few % to ~85% of peak as we add warps -- that curve is the GPU's whole personality.
+The fix is **concurrency**, and here's the *proof* it's real -- not just "use more of the chip": pin to **a single SM** (one block) and add warps 1..32. Throughput climbs ~**18x** -- on *one* SM, with nothing changed but how many warps it has to switch among. When a warp stalls on a load, the scheduler runs another in zero cycles (state lives in the register file). That is the whole trick. "18,176 CUDA cores" is **not** 18,176 CPUs -- it's how many warp-tasks you can keep in flight.
 
-**Little's law:** bandwidth = bytes-in-flight / latency. To fill ~960 GB/s at ~230 ns you need ~220 KB in flight -> thousands of concurrent loads -> thousands of warps. *That* is why the chip has a ~36 MB register file and lightweight threads. Not just parallel -- **concurrent**.
+And that number **moves**: warps-per-SM = *occupancy* = register-file / (regs-per-thread x 32). A register-heavy kernel fits fewer warps, hides less latency, and slides down the curve (Part C in the output: 32 regs -> 48 warps, 148 regs -> 8 warps). Your register count is visible only in **`ptxas -v`** and the **profiler** -- which is exactly why you need them.
 
 ```cpp
-// dependent loads: each waits for the previous -> raw latency, nothing to hide it
-__global__ void chase(const int* next, int steps, int* sink) {
-  int idx = 0;
-  for (int i = 0; i < steps; ++i) idx = next[idx];   // address depends on last load
-  *sink = idx;
-}                                                    // launched <<<1,1>>>: one thread
-// Part B sweeps the SAME copy() kernel above over more and more warps.
+// each thread chases its own dependent-load cycle: latency-bound, nothing hides it
+template <int K> __global__ void chase(const int* next, size_t N, int steps, int* sink) {
+  size_t idx = (threadIdx.x * 2654435761ull) % N;
+  int r[K];                                  // K live registers -> controls occupancy
+  for (int i=0;i<steps;++i){ idx = next[idx]; for(int k=0;k<K;++k) r[k]^=(int)idx; }
+  /* ...keep r[] live... */
+}
+chase<1><<<1, 32*W>>>(...);   // ONE block = ONE SM; sweep W = 1..32 warps
 ```
 """)
 code(r"""
 out = sh("./latency", cwd=f"{ROOT}/demo7_latency"); print(out)
-lat = grab(out, r"latency:\s*([\d.]+)\s*ns")
-rows = re.findall(r"^\s*(\d+)\s+([\d.]+)\s+[\d.]+%\s*$", out, re.M)
-warps = [int(a) for a, _ in rows]; gbps = [float(b) for _, b in rows]
+lat = grab(out, r"([\d.]+)\s*ns/access")
+rows = re.findall(r"^\s*(\d+)\s+([\d.]+)\s+[\d.]+x\s*$", out, re.M)
+warps = [int(a) for a, _ in rows]; thru = [float(b) for _, b in rows]
 fig, ax = plt.subplots(figsize=(6.6, 4))
-ax.plot(warps, gbps, "o-", color=GPU, lw=2.2, ms=7, mfc="white", mew=2)
-ax.axhline(960, ls="--", color=CEIL, label="GDDR6 peak")
-ax.set_xscale("log", base=2); ax.set_xlabel("resident warps (log)"); ax.set_ylabel("copy bandwidth (GB/s)")
-ax.set_title(f"Same kernel: latency ({lat:.0f} ns/access) is hidden by concurrency")
-ax.legend(loc="lower right")
+ax.plot(warps, thru, "o-", color=GPU, lw=2.2, ms=8, mfc="white", mew=2)
+ax.set_xscale("log", base=2); ax.set_xlabel("warps on ONE SM"); ax.set_ylabel("Maccess/s (single SM)")
+sp = (thru[-1]/thru[0]) if thru else 0
+ax.set_title(f"One SM, {lat:.0f} ns latency: {sp:.0f}x just by switching warps")
 plt.show()
 """)
-
 # ----------------------------------------------------------------------------
 md(r"""
 ## 3. ...and the cache hides it too -- so measure at GB scale  (~4 min)
