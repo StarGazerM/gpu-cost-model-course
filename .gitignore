@@ -38,3 +38,4 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 cub_compare
+thrust_compare
