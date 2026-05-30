@@ -46,6 +46,14 @@ md(r"""
 supporting material.)
 """)
 
+md(r"""
+## How to read this hour: it's a guessing game
+
+Each section pits two pieces of code and asks **which is faster, and by how much** -- then we run it, live. You will guess wrong, often, and every miss *is* the lesson: on a GPU you cannot eyeball performance; you compute the cost model.
+
+Some demos (the pointer `chase`) are deliberate **golf** -- useless functions that isolate exactly one mechanism so you can see it in the clear. You will never write them. But you cannot *read* the code you actually ship -- GEMM, CUB's merge and radix -- without them, because that code is loops-over-loops, unrolled and register-blocked everywhere, and every line is one of these tradeoffs. **The first half builds the vocabulary; the second half spends it.**
+""")
+
 code(r"""
 %matplotlib inline
 import subprocess, re, os
@@ -87,6 +95,10 @@ __global__ void copy(float4* out, const float4* in, size_t n) {
 }
 ```
 """)
+md(r"""
+**Guess first** 🎲 -- GPU streaming copy vs CPU STREAM Triad: how many times faster? Write a number.
+""")
+
 code(r"""
 g = grab(sh("./stream_gpu", cwd=f"{ROOT}/demo1_bandwidth"), r"copy kernel:\s*([\d.]+)")
 numa = "numactl --cpunodebind=0 --membind=0 " if sh("which numactl").strip() else ""
@@ -121,6 +133,10 @@ template <int K> __global__ void chase(const int* next, size_t N, int steps, int
 chase<1><<<1, 32*W>>>(...);   // ONE block = ONE SM (4 schedulers); sweep W = 1..32 warps
 ```
 """)
+md(r"""
+**Guess first** 🎲 -- it's a *single SM* (it can issue only 4 warps/clock). Going 1 -> 32 warps on it: flat, or faster? by how much?
+""")
+
 code(r"""
 out = sh("./latency", cwd=f"{ROOT}/demo7_latency"); print(out)
 lat = grab(out, r"([\d.]+)\s*ns/access")
@@ -153,6 +169,10 @@ __global__ void stage(int* a, int n, int j, int k) {
 }
 ```
 """)
+md(r"""
+**Guess first** 🎲 -- the *same* sort kernel on 64 MB vs 256 MB of keys: same throughput, or not? and why would it differ?
+""")
+
 code(r"""
 sizes = [24, 25, 26, 27]
 mk = [grab(sh(f"./v0_naive {s} 5", cwd=f"{ROOT}/demo2_sort"), r"([\d.]+)\s*Mkeys/s") for s in sizes]
@@ -187,6 +207,10 @@ thrust::sort(d.begin(), d.end());             // -> radix  (arithmetic key + def
 thrust::sort(d.begin(), d.end(), MyLess());   // -> merge  (custom comparator TYPE blocks radix)
 ```
 """)
+md(r"""
+**Guess first** 🎲 -- `thrust::sort(x)` vs `thrust::sort(x, MyLess())`. Same data, same ascending order, a comparator that *means* `a < b`. Same speed? If not, which way, and how much?
+""")
+
 code(r"""
 out = sh("./thrust_compare 28 6", cwd=f"{ROOT}/demo6_mergesort"); print(out)
 r = grab(out, r"-> radix :\s*([\d.]+)"); m = grab(out, r"-> merge :\s*([\d.]+)")
@@ -217,6 +241,10 @@ cudaMalloc(&d_temp, bytes);
 cub::DeviceRadixSort::SortKeys(d_temp, bytes, d_in, d_out, n);
 ```
 """)
+md(r"""
+**Guess first** 🎲 -- a *world-class* comparison sort (CUB merge) vs CUB radix, both at 1 GB: which wins, and by how much?
+""")
+
 code(r"""
 ARC = [("v0_naive","v0 naive"),("v1_shared","v1 shared"),("v3_multiblock","v3 big-tile"),("v4_cub","v4 CUB radix")]
 ms = {lbl: grab(sh(f"./{b} 26 10", cwd=f"{ROOT}/demo2_sort"), r"([\d.]+)\s*ms") for b, lbl in ARC}
@@ -257,6 +285,10 @@ __device__ int merge_path(const int* A,int aN,const int* B,int bN,int diag){
 }
 ```
 """)
+md(r"""
+**Guess first** 🎲 -- merge sort with 1 vs 16 items/thread (register blocking). Does it even matter at GB scale, on a chip with a 96 MB L2 and fast shared atomics?
+""")
+
 code(r"""
 # register-blocking ablation: rebuild merge sort with IPT 1..16 and sort 1 GB
 res = {}
@@ -292,6 +324,10 @@ for (int i = 0; i < N; ++i) {
 // the fix, same kernel: cudaMallocAsync(&d,bytes,s) / cudaFreeAsync(d,s)  (+ a CUDA graph)
 ```
 """)
+md(r"""
+**Guess first** 🎲 -- the *identical* sort kernel, but `cudaMalloc`/`Free` every iteration vs `cudaMallocAsync`: how much does *just the allocator* cost?
+""")
+
 code(r"""
 H = ["naive", "pool", "graph"]
 outs = {h: sh(f"./{h}_harness 20 200", cwd=f"{ROOT}/demo3_rugpull") for h in H}
@@ -312,6 +348,8 @@ md(r"""
 Everything pointed one way. The chip is a **bandwidth machine you keep fed by hiding latency with concurrency**; on top of that, `thrust::sort` picks radix-vs-merge by *type* at compile time, and CUB ships *both* sorts (and both an atomic and a sort-based histogram). The experts didn't find *the* answer -- they encoded the **question** and a chooser, because the right choice is a function of the input and the chip.
 
 So the one sentence to leave with: **compute the cost model first.** Bytes moved, passes, latency vs concurrency, where the data lives, how you access it -- that arithmetic selects the algorithm, tells you when to stop tuning, and tells you which library call to make. On a GPU, that is the program; the kernel is a detail.
+
+**The payoff.** Open CUB's `block_merge_sort.cuh` now. The per-thread register sorting-network, the shared-memory `MergePath` merge, the `ITEMS_PER_THREAD` blocking -- you just watched each one in isolation and guessed at its cost. You can *read* it. That is what an hour of golf buys: not that you can write GEMM, but that you can read the cost-model decisions in the code you already depend on.
 """)
 
 nb["cells"] = cells
