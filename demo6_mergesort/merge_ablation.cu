@@ -33,10 +33,15 @@ __device__ __forceinline__ int merge_path(const int* A, int aN, const int* B,
   return lo;
 }
 
-__device__ __forceinline__ void net_sort(int (&a)[IPT]) {  // odd-even transposition
+// a sorting NETWORK: a fixed, data-oblivious sequence of compare-exchanges.
+// branchless (min/max, no `if`) -> all 32 lanes of a warp run it in lockstep
+// with zero divergence, each sorting its OWN IPT registers.
+__device__ __forceinline__ void net_sort(int (&a)[IPT]) {  // odd-even network
   for (int i = 0; i < IPT; ++i)
-    for (int j = (i & 1); j + 1 < IPT; j += 2)
-      if (a[j] > a[j + 1]) { int t = a[j]; a[j] = a[j + 1]; a[j + 1] = t; }
+    for (int j = (i & 1); j + 1 < IPT; j += 2) {
+      int lo = min(a[j], a[j + 1]), hi = max(a[j], a[j + 1]);  // branchless compare-exchange
+      a[j] = lo; a[j + 1] = hi;
+    }
 }
 
 // Sort one TILE per block: register network per thread, then doubling merge

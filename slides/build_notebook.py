@@ -313,6 +313,19 @@ template <int IPT> __global__ void block_sort(int* g, ...) {
 // IPT=16: 16 keys sorted per thread in registers before any shared/global trip.
 ```
 
+**What `net_sort` is** (the per-thread sort): a **sorting network** -- a *fixed*, branchless sequence of compare-exchanges that sorts a small set. It is **data-oblivious** (the very same comparisons run regardless of the values), so there are no branches; all 32 lanes of a warp execute it in **lockstep with zero divergence**, each sorting its own registers. A normal comparison sort's `if`s would make lanes diverge and serialize; a network never does -- which is *why* it's the right per-thread sort on a SIMD machine.
+
+```cpp
+// odd-even sorting network on IPT registers: branchless compare-exchanges only
+__device__ void net_sort(int (&a)[IPT]) {
+  for (int i = 0; i < IPT; ++i)
+    for (int j = i & 1; j + 1 < IPT; j += 2) {
+      int lo = min(a[j], a[j+1]), hi = max(a[j], a[j+1]);   // no `if` -> no divergence
+      a[j] = lo; a[j+1] = hi;
+    }
+}
+```
+
 *(The trick that lets threads cooperate on the merge -- `MergePath` / co-rank -- is **algorithmic** plumbing: it's how you load-balance a parallel merge to shrink the work bound. It matters for correctness, but it is not a *hardware* lever, so we don't dwell on it here.)*
 """)
 
