@@ -37,3 +37,4 @@ compile_commands.json
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+cub_compare
