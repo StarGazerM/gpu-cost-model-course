@@ -292,30 +292,32 @@ plt.tight_layout(); plt.show()
 """)
 
 md(r"""
-### 5b. Merge -- *the cache / access-pattern / memory-hierarchy story*  (~9 min)
+### 5b. Merge -- the on-chip memory lever: register blocking  (~9 min)
 
-> **Demo** `demo6_mergesort/merge_ablation` &middot; **in:** 2^28 random int32 &middot; **out:** Mkeys/s vs ITEMS_PER_THREAD &middot; **algorithm:** a CUB-faithful merge sort (per-thread register network -> shared MergePath block merge -> device MergePath merge), recompiled with one opt removed &middot; **why:** ablate from the optimized code -- NVIDIA added each opt deliberately, so removing it measures its worth; tests whether gradual tuning climbs on modern HW.
+> **Demo** `demo6_mergesort/merge_ablation` &middot; **in:** 2^28 random int32 &middot; **out:** Mkeys/s vs ITEMS_PER_THREAD &middot; **algorithm:** a CUB-faithful merge sort, recompiled with one number changed -- how many keys each thread holds in registers &middot; **why:** show the *hardware* lever behind merge's speed (keeping work in registers) and measure whether it still pays on modern silicon.
 
-Merge is the **general** sort (any comparator, where radix can't go), and its CUB implementation is pure hierarchy choreography -- you don't change the algorithm, you change *where data lives and how you touch it*: per-thread **register sorting-networks**, **shared-memory merge tiles** with **`MergePath` co-rank**, and a device-level merge of tiles.
+Merge is the **general** sort (any comparator, where radix can't go). Its speed on a GPU isn't about the algorithm -- it's about **where the data lives**. The lever is **register blocking**, dialed by one number, **`ITEMS_PER_THREAD` (IPT)**: how many keys each thread holds in its **registers** -- the fastest, and across the whole chip the *largest*, on-chip memory (~36 MB) -- and sorts there *before* it ever touches shared or global memory. Bigger IPT = more of the sort done in registers, fewer round-trips down the hierarchy.
 
-Does *gradually tuning* those layers actually climb on this hardware, or has the big L2 + fast shared atomics flattened the middle? We ablate -- start from CUB-faithful code, remove one optimization at a time at GB scale. Register blocking (`ITEMS_PER_THREAD`) is the first knob:
+The hardware question (the guess): does pushing work into registers still pay on modern silicon, or has the 96 MB L2 flattened it? We ablate it directly -- the *same* CUB-faithful merge sort, recompiled with IPT = 1..16, at GB scale.
 
 ```cpp
-// per-thread register sorting network (data-oblivious, branchless)
-__device__ void net_sort(int (&a)[IPT]) {
-  for (int i=0;i<IPT;++i) for (int j=i&1; j+1<IPT; j+=2)
-    if (a[j] > a[j+1]) { int t=a[j]; a[j]=a[j+1]; a[j+1]=t; }
+// register blocking: each thread holds IPT keys in REGISTERS and sorts them there,
+// before any trip to shared/global. Registers are the fastest on-chip memory.
+template <int IPT> __global__ void block_sort(int* g, ...) {
+  int keys[IPT];                                 // <-- lives in registers
+  for (int i=0;i<IPT;++i) keys[i] = g[base + tid*IPT + i];   // coalesced load
+  net_sort(keys);                                // sort this thread's IPT keys IN REGISTERS
+  /* ...then merge across threads through shared memory... */
 }
-// MergePath co-rank: where does this thread's output diagonal split the two runs?
-__device__ int merge_path(const int* A,int aN,const int* B,int bN,int diag){
-  int lo = max(0,diag-bN), hi = min(diag,aN);
-  while (lo<hi){ int m=(lo+hi)/2; if (A[m] <= B[diag-1-m]) lo=m+1; else hi=m; }
-  return lo;                       // -> each thread merges its IPT-slice in parallel
-}
+// IPT=1 : one key/thread, nothing sorted in registers.
+// IPT=16: 16 keys sorted per thread in registers before any shared/global trip.
 ```
+
+*(The trick that lets threads cooperate on the merge -- `MergePath` / co-rank -- is **algorithmic** plumbing: it's how you load-balance a parallel merge to shrink the work bound. It matters for correctness, but it is not a *hardware* lever, so we don't dwell on it here.)*
 """)
+
 md(r"""
-**Guess first** 🎲 -- merge sort with 1 vs 16 items/thread (register blocking). Does it even matter at GB scale, on a chip with a 96 MB L2 and fast shared atomics?
+**Guess first** 🎲 -- merge sort with 1 vs 16 items/thread (register blocking). Does pushing work into registers even matter at GB scale, on a chip with a 96 MB L2?
 
 <table style="width:100%"><tr><td style="width:50%;vertical-align:top"><b>1 item / thread</b><pre>nvcc -DIPT=1  merge_ablation.cu</pre></td><td style="width:50%;vertical-align:top"><b>16 items / thread (register-blocked)</b><pre>nvcc -DIPT=16 merge_ablation.cu</pre></td></tr></table>
 
