@@ -101,15 +101,15 @@ plt.show()
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 2. The hidden half: latency, and how the GPU hides it  (~6 min)
+## 2. The hidden half: latency, and why "18k cores" is a lie  (~6 min)
 
-> **Demo** `demo7_latency` &middot; **in:** a 1 GB int array wired as one random permutation cycle &middot; **out:** raw latency, single-SM throughput vs warps, and warps/SM vs register usage &middot; **algorithm:** per-thread dependent-load pointer chase, run on ONE SM with 1..32 warps, then with register-heavy variants &middot; **why:** *prove* latency hiding (not "more cores") is what makes the GPU fast, and that the parallelism is *occupancy* -- set by registers, not silicon.
+> **Demo** `demo7_latency` &middot; **in:** a 1 GB int array wired as one random permutation cycle &middot; **out:** raw latency, single-SM throughput vs warps (against the SM's issue width), and warps/SM vs register usage &middot; **algorithm:** per-thread dependent-load pointer chase on ONE SM, swept 1..32 warps, then register-heavy variants &middot; **why:** *prove* that latency hiding via oversubscription -- not "more cores" -- is the engine, and that the parallelism is *occupancy*, set by registers.
 
-The GPU's per-access latency is **bad**: one thread chasing dependent loads to HBM waits ~230 ns / ~580 cycles. **One thread is slow.**
+One thread chasing dependent loads to HBM waits ~230 ns / ~580 cycles. **One thread is slow** -- the GPU's per-access latency is *worse* than a CPU cache.
 
-The fix is **concurrency**, and here's the *proof* it's real -- not just "use more of the chip": pin to **a single SM** (one block) and add warps 1..32. Throughput climbs ~**18x** -- on *one* SM, with nothing changed but how many warps it has to switch among. When a warp stalls on a load, the scheduler runs another in zero cycles (state lives in the register file). That is the whole trick. "18,176 CUDA cores" is **not** 18,176 CPUs -- it's how many warp-tasks you can keep in flight.
+Now the proof, on **one SM** so it can't be "use more cores": an Ada SM has just **4 warp schedulers** -- it can *issue* only 4 warps per clock (128 FP32 lanes = 4 warps of SIMD). If warps were cores, throughput would flatten at 4. **It doesn't.** Oversubscribe the *same* SM to 8, 16, 32 warps and throughput keeps climbing -- **32 warps (8x oversubscribed) is ~5x faster than at 4.** Those extra warps cannot be computing (there are only 4 slots); they are covering each other's 580-cycle stalls. **Warps are latency-hiding tasks you oversubscribe, not cores.**
 
-And that number **moves**: warps-per-SM = *occupancy* = register-file / (regs-per-thread x 32). A register-heavy kernel fits fewer warps, hides less latency, and slides down the curve (Part C in the output: 32 regs -> 48 warps, 148 regs -> 8 warps). Your register count is visible only in **`ptxas -v`** and the **profiler** -- which is exactly why you need them.
+So "18,176 CUDA cores" is not 18,176 CPUs -- it's SIMD lanes. The real parallelism is how many *warps* you keep resident = **occupancy** = register-file / (regs/thread x 32). A register-heavy kernel fits fewer (Part C: 32 regs -> 48 warps, 148 regs -> **8** warps), hides less latency, and slides down the curve. That number is visible only in **`ptxas -v`** and the **profiler** -- which is why you need them.
 
 ```cpp
 // each thread chases its own dependent-load cycle: latency-bound, nothing hides it
@@ -117,21 +117,21 @@ template <int K> __global__ void chase(const int* next, size_t N, int steps, int
   size_t idx = (threadIdx.x * 2654435761ull) % N;
   int r[K];                                  // K live registers -> controls occupancy
   for (int i=0;i<steps;++i){ idx = next[idx]; for(int k=0;k<K;++k) r[k]^=(int)idx; }
-  /* ...keep r[] live... */
 }
-chase<1><<<1, 32*W>>>(...);   // ONE block = ONE SM; sweep W = 1..32 warps
+chase<1><<<1, 32*W>>>(...);   // ONE block = ONE SM (4 schedulers); sweep W = 1..32 warps
 ```
 """)
 code(r"""
 out = sh("./latency", cwd=f"{ROOT}/demo7_latency"); print(out)
 lat = grab(out, r"([\d.]+)\s*ns/access")
-rows = re.findall(r"^\s*(\d+)\s+([\d.]+)\s+[\d.]+x\s*$", out, re.M)
+rows = re.findall(r"^\s*(\d+)\s+[\d.]+x\s+([\d.]+)\s+[\d.]+x\s*$", out, re.M)
 warps = [int(a) for a, _ in rows]; thru = [float(b) for _, b in rows]
-fig, ax = plt.subplots(figsize=(6.6, 4))
+fig, ax = plt.subplots(figsize=(6.8, 4))
 ax.plot(warps, thru, "o-", color=GPU, lw=2.2, ms=8, mfc="white", mew=2)
+ax.axvline(4, ls="--", color=MERGE); ax.text(4.2, thru[0], " 4 schedulers\n (issue width)", color=MERGE, va="bottom")
 ax.set_xscale("log", base=2); ax.set_xlabel("warps on ONE SM"); ax.set_ylabel("Maccess/s (single SM)")
-sp = (thru[-1]/thru[0]) if thru else 0
-ax.set_title(f"One SM, {lat:.0f} ns latency: {sp:.0f}x just by switching warps")
+over = (thru[-1]/thru[2]) if len(thru) > 2 else 0    # 32 warps vs 4 warps
+ax.set_title(f"One SM, {lat:.0f} ns latency: 8x oversubscription = {over:.1f}x past the 4 cores")
 plt.show()
 """)
 # ----------------------------------------------------------------------------

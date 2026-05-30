@@ -43,11 +43,14 @@ __global__ void chase(const int* __restrict__ next, size_t N, int steps, int* si
 
 int main() {
   cudaDeviceProp p; CK(cudaGetDeviceProperties(&p, 0));
-  int coresPerSM = 128;  // Ada
-  printf("Chip: %d SMs x %d FP32 lanes = %d \"CUDA cores\"; max %d warps/SM; "
-         "%d KB regfile/SM\n\n", p.multiProcessorCount, coresPerSM,
-         p.multiProcessorCount * coresPerSM, p.maxThreadsPerMultiProcessor / 32,
-         p.regsPerMultiprocessor * 4 / 1024);
+  int coresPerSM = 128, schedPerSM = 4;  // Ada: 128 FP32 lanes, 4 warp schedulers
+  printf("Chip: %d SMs x %d FP32 lanes = %d \"CUDA cores\".\n", p.multiProcessorCount,
+         coresPerSM, p.multiProcessorCount * coresPerSM);
+  printf("Per SM: %d warp schedulers -> it can ISSUE only %d warps per clock "
+         "(128 lanes = %d warps of SIMD). Naively, '%d things at once'.\n",
+         schedPerSM, schedPerSM, schedPerSM, schedPerSM);
+  printf("Yet it holds up to %d warps resident. Why so many more than it can run?\n\n",
+         p.maxThreadsPerMultiProcessor / 32);
 
   // permutation cycle over a >L2 array
   size_t N = (size_t)1 << 28;                   // 1 GB >> 96 MB L2
@@ -74,16 +77,24 @@ int main() {
   printf("Part A  one thread, dependent loads: %.0f ns/access (~%.0f cycles). "
          "one thread is slow.\n\n", lat, lat * (p.clockRate / 1e6));
 
-  // ---- Part B: ONE SM (1 block), warps 1..32 ----
-  printf("Part B  ONE SM (single block), add warps -> the same SM hides latency:\n");
-  printf("  warps   Maccess/s   speedup vs 1 warp\n");
-  int sB = 20000; double base = 0;
+  // ---- Part B: ONE SM (1 block), warps 1..32, vs the 4-scheduler issue width ----
+  printf("Part B  ONE SM (single block), add warps past the %d schedulers it can issue:\n",
+         schedPerSM);
+  printf("  warps  oversub   Maccess/s   speedup\n");
+  int sB = 20000; double base = 0, t4 = 0, t32 = 0;
   for (int w = 1; w <= 32; w *= 2) {
     float t = time_ms(1, 32 * w, sB);
     double acc = (double)32 * w * sB / (t / 1e3) / 1e6;
     if (w == 1) base = acc;
-    printf("  %4d   %9.1f     %.1fx\n", w, acc, acc / base);
+    if (w == schedPerSM) t4 = acc;
+    if (w == 32) t32 = acc;
+    printf("  %4d   %4.0fx     %9.1f     %.1fx\n", w, (double)w / schedPerSM, acc, acc / base);
   }
+  printf("  -> %d warps already fills the %d schedulers; %d warps (%dx oversubscribed) is "
+         "%.1fx FASTER.\n", schedPerSM, schedPerSM, 32, 32 / schedPerSM, t32 / t4);
+  printf("     Those extra warps cannot be using cores -- there are only %d -- they are\n"
+         "     hiding the %.0f-cycle latency. Warps are TASKS you oversubscribe, not cores.\n\n",
+         schedPerSM, lat * (p.clockRate / 1e6));
 
   // ---- Part C: occupancy = f(registers) ----
   printf("\nPart C  warps that fit on an SM = occupancy, set by registers (it MOVES):\n");
