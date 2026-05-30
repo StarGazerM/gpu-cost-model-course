@@ -13,6 +13,7 @@ launch_overhead_check
 v0_global_atomic
 v1_shared_privatized
 v1b_global_privatized
+v1d_shared_dynamic
 v2_warp_aggregated
 *.o
 
