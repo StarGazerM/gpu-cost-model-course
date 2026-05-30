@@ -26,13 +26,14 @@ A 1-hour course for database & systems researchers. One thesis, proven by measur
 """)
 
 md(r"""
-## Time budget -- 1 hour (~51 min content + ~5 Q&A)
+## Time budget -- 1 hour (~55 min content + ~5 Q&A)
 
 | # | section | min |
 |---|---|---|
 | 0 | Thesis + hardware | 3 |
 | 1 | Bandwidth identity | 4 |
 | 2 | **Latency & how the GPU hides it** (concurrency) | 6 |
+| 2b | **A thread is also a SIMD lane** (divergence) | 4 |
 | 3 | Cache cliff (measure at GB) | 4 |
 | 4 | **Cost model in two lines** (thrust dispatch) | 5 |
 | 5 | Two sorts (framing) | 2 |
@@ -75,6 +76,7 @@ sh("make -s -C demo1_bandwidth; make -s -C demo2_sort; make -s -C demo3_rugpull"
 sh("cd demo6_mergesort && nvcc -O3 -std=c++17 -arch=sm_89 -o cub_compare cub_compare.cu && "
    "nvcc -O3 -std=c++17 -arch=sm_89 -o thrust_compare thrust_compare.cu")
 sh("cd demo7_latency && nvcc -O3 -std=c++17 -arch=sm_89 -o latency latency.cu")
+sh("cd demo8_divergence && nvcc -O3 -std=c++17 -arch=sm_89 -o divergence divergence.cu")
 print("built.")
 """)
 
@@ -166,6 +168,35 @@ over = (thru[-1]/thru[2]) if len(thru) > 2 else 0    # 32 warps vs 4 warps
 ax.set_title(f"One SM, {lat:.0f} ns latency: 8x oversubscription = {over:.1f}x past the 4 cores")
 plt.show()
 """)
+# ----------------------------------------------------------------------------
+md(r"""
+## 2b. The other face: a "thread" is also a SIMD lane  (~4 min)
+
+In section 2 a "thread" was a *task* you oversubscribe to **hide** latency. Inside a warp it's the opposite: 32 "threads" are **one SIMD unit** -- 32 lanes running the *same instruction* in lockstep. A data-dependent branch doesn't fork 32 independent threads; the warp executes *every* path some lane takes, and a data-dependent loop runs until the **slowest** lane finishes while the rest idle.
+
+The proof, total work held constant: every warp does the same number of iterations -- we only change whether the 32 lanes share them *evenly* or *unevenly* (one branch on the lane id). Same work; the uneven version is **~2x slower**, purely because the warp moves at its slowest lane.
+""")
+
+md(r"""
+**Guess first** 🎲 -- both kernels do the **same total work per warp**; A spreads it evenly across the 32 lanes, B unevenly (lane L does L units -- a branch on the lane id). Same speed, or not? by how much?
+
+<table style="width:100%"><tr><td style="width:50%;vertical-align:top"><b>A -- even (no divergence)</b><pre>int iters = 16 * step;   // every lane equal</pre></td><td style="width:50%;vertical-align:top"><b>B -- uneven (a branch)</b><pre>int iters = lane * step; // lanes 0..31 differ</pre></td></tr></table>
+""")
+
+code(r"""
+out = sh("./divergence", cwd=f"{ROOT}/demo8_divergence"); print(out)
+u = grab(out, r"equal work\):\s*([\d.]+)"); v = grab(out, r"a branch\):\s*([\d.]+)")
+fig, ax = plt.subplots(figsize=(5.4, 4))
+ax.bar(["even\n(no divergence)", "uneven\n(a branch)"], [u, v], color=[GPU, MERGE])
+ax.set_ylabel("ms (same total work)"); ax.set_title(f"Same work, {v/u:.1f}x slower -- the warp runs at its slowest lane")
+for i, val in enumerate([u, v]): ax.text(i, val, f"{val:.2f}", ha="center", va="bottom", fontweight="bold")
+plt.show()
+""")
+
+md(r"""
+This is the leaky abstraction CUDA's language papers over: a "thread" is **sometimes an independent task** (when enough warps hide latency -- section 2) and **sometimes a SIMD lane** (when the warp moves in lockstep -- here). "Parallelism" is sometimes *simultaneous* (independent warps) and sometimes *hidden* (one stalls, another runs). You write the same scalar per-thread code for both -- and you must know which it actually is. (It is also *why* the per-thread sort in 5b is a branchless **network**: to never pay this tax.)
+""")
+
 # ----------------------------------------------------------------------------
 md(r"""
 ## 3. ...and the cache hides it too -- so measure at GB scale  (~4 min)
