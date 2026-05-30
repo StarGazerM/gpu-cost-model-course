@@ -16,7 +16,7 @@ int main(int argc, char** argv) {
   // Pre-size temp storage (depends on n + level count, not the data).
   size_t temp_bytes = 0;
   cub::DeviceHistogram::HistogramEven(
-      nullptr, temp_bytes, (int*)nullptr, (unsigned*)nullptr, NBINS + 1, 0, NBINS,
+      nullptr, temp_bytes, (int*)nullptr, (unsigned*)nullptr, NBINS + 1, 0, HRANGE,
       (int)args.n);
   void* d_temp = nullptr;
   CUDA_CHECK(cudaMalloc(&d_temp, temp_bytes));
@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
   int rc = histo::run_and_report("v4_cub", args,
       [&](const int* d_in, size_t n, unsigned* d_out) {
         cub::DeviceHistogram::HistogramEven(d_temp, temp_bytes, d_in, d_out,
-                                            NBINS + 1, 0, NBINS, (int)n);
+                                            NBINS + 1, 0, HRANGE, (int)n);
       });
   CUDA_CHECK(cudaFree(d_temp));
   return rc;

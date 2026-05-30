@@ -15,6 +15,7 @@ v1_shared_privatized
 v1b_global_privatized
 v1d_shared_dynamic
 v2_warp_aggregated
+v5_sort_histogram
 *.o
 
 # Generated profiling / SASS artifacts

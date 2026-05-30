@@ -22,6 +22,10 @@
 #define NBINS 256
 #endif
 
+#ifndef HRANGE
+#define HRANGE (1 << 30)   // sample value range [0, HRANGE): arbitrary keys, NOT bin ids
+#endif
+
 #define CUDA_CHECK(call)                                                       \
   do {                                                                         \
     cudaError_t _e = (call);                                                   \
@@ -47,25 +51,36 @@ inline Args parse_args(int argc, char** argv, int default_log2n = 28) {
   return a;
 }
 
-// int32 samples in [0, NBINS). zipf<=0 -> uniform; else Zipfian over bins.
+// CUB HistogramEven ScaleTransform: map an arbitrary key in [0,HRANGE) to a bin.
+// bin = (sample - 0) * NBINS / HRANGE; out-of-range samples are dropped.
+__host__ __device__ inline int scale_bin(int sample) {
+  if (sample < 0 || sample >= HRANGE) return -1;
+  return (int)(((long long)sample * (long long)NBINS) / (long long)HRANGE);
+}
+
+// Arbitrary int keys in [0,HRANGE) -- NOT bin ids. zipf<=0: uniform keys.
+// zipf>0: the BIN distribution is Zipfian (a few hot value-ranges), keys uniform
+// within each bin -- realistic skew, the way a real column is distributed.
 inline std::vector<int> make_input(size_t n, double zipf, unsigned seed = 7) {
   std::vector<int> v(n);
   std::mt19937 rng(seed);
   if (zipf <= 0.0) {
-    std::uniform_int_distribution<int> d(0, NBINS - 1);
+    std::uniform_int_distribution<int> d(0, HRANGE - 1);
     for (size_t i = 0; i < n; ++i) v[i] = d(rng);
   } else {
     std::vector<double> w(NBINS);
     for (int k = 0; k < NBINS; ++k) w[k] = 1.0 / std::pow(k + 1, zipf);
-    std::discrete_distribution<int> d(w.begin(), w.end());
-    for (size_t i = 0; i < n; ++i) v[i] = d(rng);
+    std::discrete_distribution<int> bin_dist(w.begin(), w.end());
+    int bin_width = HRANGE / NBINS;
+    std::uniform_int_distribution<int> off(0, bin_width - 1);
+    for (size_t i = 0; i < n; ++i) v[i] = bin_dist(rng) * bin_width + off(rng);
   }
   return v;
 }
 
 inline std::vector<unsigned> cpu_histogram(const std::vector<int>& in) {
   std::vector<unsigned> h(NBINS, 0);
-  for (int x : in) h[x]++;
+  for (int x : in) { int b = scale_bin(x); if (b >= 0) h[b]++; }
   return h;
 }
 
