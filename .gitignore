@@ -12,6 +12,7 @@ graph_harness
 launch_overhead_check
 v0_global_atomic
 v1_shared_privatized
+v1b_global_privatized
 v2_warp_aggregated
 *.o
 
