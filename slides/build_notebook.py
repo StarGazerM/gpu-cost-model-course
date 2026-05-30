@@ -3,9 +3,6 @@
 
 Run:  python3 slides/build_notebook.py            (writes ../course.ipynb)
 Then: jupyter nbconvert --to notebook --execute --inplace course.ipynb
-
-Runs the fast/medium demos live; loads pre-generated artifacts (SASS) where a
-live run would be slow. Executes end-to-end in a couple of minutes.
 """
 import os
 import nbformat as nbf
@@ -21,36 +18,32 @@ md(r"""
 
 A 1-hour course for database & systems researchers. One thesis, proven by measurement on the hardware in front of us:
 
-> **You don't pick an algorithm and then make the chip run it. You compute the cost model first -- bytes moved, passes over memory, arithmetic intensity, where the data lives, how you access it -- and *that* selects the algorithm before you write a line.** Asymptotic optimality is not hardware-neutral; "best" is a function of the chip.
+> **You don't pick an algorithm and then make the chip run it. You compute the cost model first -- bytes moved, passes over memory, latency vs concurrency, where the data lives, how you access it -- and *that* selects the algorithm before you write a line.** Asymptotic optimality is not hardware-neutral; "best" is a function of the chip.
 
-**The chip:** a single **RTX 6000 Ada** (sm_89, AD102) -- 48 GB **GDDR6** ~960 GB/s, **96 MB L2**, register file ~36 MB. A bandwidth machine with a large automatic cache, bolted to a massively parallel engine. Everything below is measured on it.
+**The chip:** a single **RTX 6000 Ada** (sm_89, AD102) -- 48 GB **GDDR6** ~960 GB/s, **96 MB L2**, register file ~36 MB. It is two things at once: a **bandwidth machine** (huge throughput, but only if you keep it fed) and a **latency-hiding concurrency machine** (per-access latency is *bad*; throughput comes from running thousands of warps so a stall in one is covered by another). GPU programming is therefore not only **parallel** -- it's **concurrent**: latency forces you to always have other work in flight.
 
-**The spine:** two sorts tell the whole story from two angles --
-- **radix** = *massive parallelism collapses the algorithm; linear-time wins*,
-- **merge** = *the cache / access-pattern / memory-hierarchy story* --
-and a production library is just a **frozen cost-model decision tree** that picks between them for you.
+**The spine:** two sorts tell the rest of the story from two angles -- **radix** = *massive parallelism collapses the algorithm; linear-time wins*, **merge** = *the cache / access-pattern / memory-hierarchy story* -- and a production library is just a **frozen cost-model decision tree** that picks between them for you.
 """)
 
 md(r"""
-## Time budget -- 1 hour (~55 min content + 5 Q&A)
+## Time budget -- 1 hour (~51 min content + ~5 Q&A)
 
-| # | section | min | note |
-|---|---|---|---|
-| 0 | Thesis + hardware | 3 | core |
-| 1 | Bandwidth identity | 4 | core |
-| 2 | Cache cliff (measure at GB) | 4 | core |
-| 3 | **Cost model in two lines** (thrust dispatch) | 5 | the hook |
-| 4 | Two sorts (framing) | 2 | core |
-| 4a | Radix: passes-law + 4x merge | 9 | core |
-| 4b | Merge: hierarchy + ablation | 9 | core |
-| 5 | Kernel is ~10% (rug pull) | 6 | keep |
-| 6 | Model is a fiction (SASS) | 4 | **cuttable** |
-| 7 | Histogram (supporting) | 6 | **cuttable** |
-| 8 | Closing | 3 | core |
-| - | Q&A | 5 | buffer |
+| # | section | min |
+|---|---|---|
+| 0 | Thesis + hardware | 3 |
+| 1 | Bandwidth identity | 4 |
+| 2 | **Latency & how the GPU hides it** (concurrency) | 6 |
+| 3 | Cache cliff (measure at GB) | 4 |
+| 4 | **Cost model in two lines** (thrust dispatch) | 5 |
+| 5 | Two sorts (framing) | 2 |
+| 5a | Radix: passes-law + 4x merge | 9 |
+| 5b | Merge: hierarchy + ablation | 9 |
+| 6 | Kernel is ~10% (rug pull) | 6 |
+| 7 | Closing | 3 |
+| - | Q&A | 5 |
 
-The two **cuttable** rows (SASS + histogram ~10 min) are the slack: spend it on
-more centerpiece depth (e.g. more ablation knobs) or trim to land under the hour.
+(SASS-diff and histogram sections were cut for time; they live in the repo as
+supporting material.)
 """)
 
 code(r"""
@@ -70,10 +63,10 @@ def sh(cmd, cwd=None, timeout=900):
 def grab(text, pat):
     m = re.search(pat, text); return float(m.group(1)) if m else float("nan")
 
-# build everything the notebook runs
-sh("make -s -C demo1_bandwidth; make -s -C demo2_sort; make -s -C demo3_rugpull; make -s -C demo5_histogram")
+sh("make -s -C demo1_bandwidth; make -s -C demo2_sort; make -s -C demo3_rugpull")
 sh("cd demo6_mergesort && nvcc -O3 -std=c++17 -arch=sm_89 -o cub_compare cub_compare.cu && "
    "nvcc -O3 -std=c++17 -arch=sm_89 -o thrust_compare thrust_compare.cu")
+sh("cd demo7_latency && nvcc -O3 -std=c++17 -arch=sm_89 -o latency latency.cu")
 print("built.")
 """)
 
@@ -97,17 +90,38 @@ plt.show()
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 2. ...but the cache hides it -- so measure at GB scale  (~4 min)
+## 2. The hidden half: latency, and how the GPU hides it  (~6 min)
 
-Run the *same naive sort kernel* across sizes. Below 96 MB the array lives in L2 and throughput is ~4x higher than reality; cross the L2 and you fall off a cliff to true HBM-bound speed.
+That bandwidth is **not free** -- it's *hidden latency*. The GPU's per-access latency is **bad**: a single thread chasing dependent loads to HBM waits hundreds of ns / hundreds of cycles per access -- worse than a CPU cache. **One GPU thread is slow.**
 
-Two lessons in one plot: (a) the memory hierarchy is the chip; (b) **any benchmark that fits in cache is lying to you** -- everything past here runs at >= 1 GB.
+The trick is **concurrency**: oversubscribe with thousands of warps; when one stalls on a load, the scheduler switches to a ready one in *zero cycles* (every warp's state lives in the register file). Bandwidth is simply what you get once enough warps are in flight to cover every stall. Watch the *same copy kernel* climb from a few % to ~85% of peak as we add warps -- that curve is the GPU's whole personality.
+
+**Little's law:** bandwidth = bytes-in-flight / latency. To fill ~960 GB/s at ~230 ns you need ~220 KB in flight -> thousands of concurrent loads -> thousands of warps. *That* is why the chip has a ~36 MB register file and lightweight threads. Not just parallel -- **concurrent**.
+""")
+code(r"""
+out = sh("./latency", cwd=f"{ROOT}/demo7_latency"); print(out)
+lat = grab(out, r"latency:\s*([\d.]+)\s*ns")
+rows = re.findall(r"^\s*(\d+)\s+([\d.]+)\s+[\d.]+%\s*$", out, re.M)
+warps = [int(a) for a, _ in rows]; gbps = [float(b) for _, b in rows]
+fig, ax = plt.subplots(figsize=(6.6, 4))
+ax.plot(warps, gbps, "o-", color=GPU, lw=2.2, ms=7, mfc="white", mew=2)
+ax.axhline(960, ls="--", color=CEIL, label="GDDR6 peak")
+ax.set_xscale("log", base=2); ax.set_xlabel("resident warps (log)"); ax.set_ylabel("copy bandwidth (GB/s)")
+ax.set_title(f"Same kernel: latency ({lat:.0f} ns/access) is hidden by concurrency")
+ax.legend(loc="lower right")
+plt.show()
+""")
+
+# ----------------------------------------------------------------------------
+md(r"""
+## 3. ...and the cache hides it too -- so measure at GB scale  (~4 min)
+
+Run the *same naive sort kernel* across sizes. Below 96 MB the array lives in L2 and throughput is ~4x higher than reality; cross the L2 and you fall off a cliff to true HBM-bound speed. **Any benchmark that fits in cache is lying to you** -- everything past here runs at >= 1 GB.
 """)
 code(r"""
 sizes = [24, 25, 26, 27]
 mk = [grab(sh(f"./v0_naive {s} 5", cwd=f"{ROOT}/demo2_sort"), r"([\d.]+)\s*Mkeys/s") for s in sizes]
-fig, ax = plt.subplots(figsize=(6.2, 4))
-x = range(len(sizes))
+fig, ax = plt.subplots(figsize=(6.2, 4)); x = range(len(sizes))
 ax.plot(x, mk, "o-", color=GPU, lw=2.5, ms=9, mfc="white", mew=2)
 ax.axvspan(-0.4, 0.5, color="#ffe7c2", alpha=0.7)
 ax.text(0, mk[0], "  fits in\n  96 MB L2", va="top", color="#a85b00", fontweight="bold")
@@ -118,16 +132,16 @@ plt.show()
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 3. The cost model, in two lines of user code  (~5 min, the hook)
+## 4. The cost model, in two lines of user code  (~5 min, the hook)
 
-The highest-level GPU sort API -- `thrust::sort`, the `std::sort` equivalent -- *already* embodies the thesis. Its dispatch (`thrust/system/cuda/detail/sort.h`, `can_use_primitive_sort`) picks at **compile time**:
+The highest-level GPU sort API -- `thrust::sort` -- *already* embodies the thesis. Its dispatch (`thrust/system/cuda/detail/sort.h`, `can_use_primitive_sort`) picks at **compile time**:
 
 ```cpp
 // arithmetic key (int/float...) AND default less/greater  -> RADIX  (cub::DeviceRadixSort)
 // custom comparator, or non-arithmetic key                -> MERGE  (cub::DeviceMergeSort)
 ```
 
-So these two calls sort the *same data into the same order* -- the only difference is a comparator whose type happens to mean `a < b` -- yet one is several times slower, because its type blocks the radix path. **The cost model, triggered by a type, invisible to the user.**
+These two calls sort the *same data into the same order* -- the only difference is a comparator whose type happens to mean `a < b` -- yet one is several times slower, because its type blocks the radix path. **The cost model, triggered by a type, invisible to the user.**
 """)
 code(r"""
 out = sh("./thrust_compare 28 6", cwd=f"{ROOT}/demo6_mergesort"); print(out)
@@ -141,16 +155,15 @@ plt.show()
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 4. Two sorts, two truths about the chip  (framing ~2 min)
+## 5. Two sorts, two truths about the chip  (framing ~2 min)
 
 Why ship *both*? Because there's no single best sort -- the cost model picks the game. The two algorithms illuminate the two halves of "what is a GPU."
 
-### 4a. Radix -- *massive parallelism collapses the algorithm; linear time wins*  (~9 min)
+### 5a. Radix -- *massive parallelism collapses the algorithm; linear time wins*  (~9 min)
 
-On a CPU you're taught O(n log n) comparison sort is optimal and you ignore radix for its constants. The GPU inverts the cost model: with near-perfect data-parallelism the per-element work is free, so **only passes over memory count** -- and O(n)-pass radix beats O(n log n) merge. First, the naive-to-radix arc (bitonic is just the bad global-memory baseline that motivates it); then radix vs a *fully optimized* CUB merge at GB scale.
+On a CPU you're taught O(n log n) comparison sort is optimal and you ignore radix for its constants. The GPU inverts the cost model: with near-perfect data-parallelism the per-element work is free, so **only passes over memory count** -- and O(n)-pass radix beats O(n log n) merge. The naive-to-radix arc (bitonic is just the bad global-memory baseline that motivates it), then radix vs a *fully optimized* CUB merge at GB scale.
 """)
 code(r"""
-# the arc: naive global bitonic -> shared -> bigger tile -> CUB radix (2^26)
 ARC = [("v0_naive","v0 naive"),("v1_shared","v1 shared"),("v3_multiblock","v3 big-tile"),("v4_cub","v4 CUB radix")]
 ms = {lbl: grab(sh(f"./{b} 26 10", cwd=f"{ROOT}/demo2_sort"), r"([\d.]+)\s*ms") for b, lbl in ARC}
 base = ms["v0 naive"]
@@ -159,7 +172,6 @@ bars = a1.bar(list(ms), list(ms.values()), color=[GPU, GPU, GPU, RADIX]); a1.set
 a1.set_ylabel("kernel-only ms (log)"); a1.set_title("Hand-tuning has a low ceiling; the algorithm wins")
 for b, v in zip(bars, ms.values()): a1.text(b.get_x()+b.get_width()/2, v, f"{base/v:.0f}x", ha="center", va="bottom", fontsize=9)
 a1.tick_params(axis="x", labelsize=8)
-# radix vs fully-optimized CUB merge at GB scale
 out = sh("./cub_compare 28 6", cwd=f"{ROOT}/demo6_mergesort")
 cm = grab(out, r"merge sort :\s*([\d.]+)"); cr = grab(out, r"radix sort :\s*([\d.]+)")
 a2.bar(["CUB merge", "CUB radix"], [cm, cr], color=[MERGE, RADIX]); a2.set_ylabel("ms (2^28, 1 GB)")
@@ -169,19 +181,31 @@ plt.tight_layout(); plt.show()
 """)
 
 md(r"""
-### 4b. Merge -- *the cache / access-pattern / memory-hierarchy story*  (~9 min)
+### 5b. Merge -- *the cache / access-pattern / memory-hierarchy story*  (~9 min)
 
-Merge is the **general** sort (any comparator, where radix can't go), and its CUB implementation is pure hierarchy choreography -- you don't change the algorithm, you change *where the data lives and how you touch it*:
-- **per-thread register sorting-networks** (`StableOddEvenSort` on `keys[ITEMS_PER_THREAD]`),
-- **shared-memory merge tiles** with **`MergePath` co-rank** to make the merge parallel and coalesced,
-- **device-level merge** of tiles, again partitioned by MergePath.
+Merge is the **general** sort (any comparator, where radix can't go), and its CUB implementation is pure hierarchy choreography -- you don't change the algorithm, you change *where data lives and how you touch it*: per-thread **register sorting-networks**, **shared-memory merge tiles** with **`MergePath` co-rank**, and a device-level merge of tiles.
 
-The honest open question (the live deep-dive): on this hardware, does *gradually tuning* those layers climb, or has the big L2 + fast shared atomics flattened the middle of the arc? That's an **ablation** -- start from CUB's final code, remove one optimization at a time -- still to be run. (What we *do* know: the fully-tuned result is the `CUB merge` bar above, and radix still beats it 4x.)
+Does *gradually tuning* those layers actually climb on this hardware, or has the big L2 + fast shared atomics flattened the middle? We ablate -- start from CUB-faithful code, remove one optimization at a time at GB scale. Register blocking (`ITEMS_PER_THREAD`) is the first knob:
+""")
+code(r"""
+# register-blocking ablation: rebuild merge sort with IPT 1..16 and sort 1 GB
+res = {}
+for ipt in [1, 2, 4, 8, 16]:
+    sh(f"cd demo6_mergesort && nvcc -O3 -std=c++17 -arch=sm_89 -DIPT={ipt} -o /tmp/m{ipt} merge_ablation.cu")
+    res[ipt] = grab(sh(f"/tmp/m{ipt} 28 6", cwd=f"{ROOT}/demo6_mergesort"), r"([\d.]+)\s*Mkeys/s")
+fig, ax = plt.subplots(figsize=(6.2, 4))
+ax.plot(list(res), list(res.values()), "o-", color=MERGE, lw=2.2, ms=8, mfc="white", mew=2)
+ax.set_xscale("log", base=2); ax.set_xlabel("ITEMS_PER_THREAD (register blocking)")
+ax.set_ylabel("Mkeys/s (2^28, 1 GB)")
+lo, hi = res[1], res[16]
+ax.set_title(f"Register blocking climbs {hi/lo:.2f}x at GB scale -- a real, gradual step")
+plt.show()
+print("The merge-tuning arc is NOT flat: structural/data-layout opts hold on modern HW.")
 """)
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 5. The kernel is ~10%  (~6 min)
+## 6. The kernel is ~10%  (~6 min)
 
 Take the best hand-rolled sort and wrap it the way a query stage actually runs: allocate, copy in, sort, copy out, free -- every iteration. The kernel never changes, yet per-iteration time swings wildly. `cudaMalloc`/`cudaFree` are synchronous driver calls; a stream-ordered pool (`cudaMallocAsync`) and a CUDA graph claw the time back -- none of it by touching the kernel.
 """)
@@ -200,50 +224,11 @@ plt.show()
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 6. The model is a fiction  (~4 min, cuttable)
-
-One GPU here, so no live hardware swap. The compile-time version is sharper: the *same source* compiles to different machine code per architecture, because `ptxas` exploits arch-specific instructions. You write `min/max`; on Hopper it becomes `VIMNMX`. CUB goes further and ships per-arch kernels emitting Hopper *collective* instructions the CUDA C model never surfaces. (Loaded from `demo4_hwswap/run_all.sh`.)
-""")
-code(r"""
-so = f"{ROOT}/demo4_hwswap/sass_out"
-if os.path.isdir(so) and os.path.exists(f"{so}/v3_multiblock_ops90.txt"):
-    for v in ["v3_multiblock", "v4_cub"]:
-        a = set(open(f"{so}/{v}_ops89.txt").read().split()); b = set(open(f"{so}/{v}_ops90.txt").read().split())
-        print(f"{v}: sm_90-only opcodes -> {', '.join(sorted(b - a))}")
-else:
-    print("Run:  cd demo4_hwswap && ./run_all.sh   (then re-run this cell)")
-""")
-
-# ----------------------------------------------------------------------------
-md(r"""
-## 7. Supporting demo: histogram = the contention story (and "high-card -> just sort")  (~6 min, cuttable)
-
-A histogram reads N keys once, trivial compute -> arithmetic intensity ~0.5 ops/byte, deeply memory-bound, floor = bytes/bandwidth (~1.1 ms for 1 GB). The lesson is *whether you reach that floor*:
-- **naive global atomics**: ~2% of peak -- not bandwidth-bound, **atomic-contention-bound** (the bus sits idle while warps stall on serialized atomics).
-- **shared-memory privatization**: ~92% -- at the roofline.
-
-The controlled experiment (`v1b`, privatize in *global* memory) showed ~19x of that win is **contention reduction**, only ~2.5x is shared memory -- *measure, don't assume which fix mattered*. And at high cardinality privatization can't fit, atomics plateau, and the right answer becomes... **sort + run-length-encode**. Histogram = sort + a pass; the primitive underneath is sort.
-""")
-code(r"""
-v0 = sh("./v0_global_atomic 28 5 0", cwd=f"{ROOT}/demo5_histogram")
-v1 = sh("./v1_shared_privatized 28 5 0", cwd=f"{ROOT}/demo5_histogram")
-p0 = grab(v0, r"\(\s*([\d.]+)% peak\)"); p1 = grab(v1, r"\(\s*([\d.]+)% peak\)")
-print(v0.strip()); print(v1.strip())
-fig, ax = plt.subplots(figsize=(5.6, 4))
-ax.bar(["global atomics\n(contention-bound)", "shared privatized\n(at roofline)"], [p0, p1], color=[MERGE, GPU])
-ax.axhline(100, ls="--", color=CEIL); ax.set_ylabel("% of bandwidth peak"); ax.set_ylim(0, 110)
-ax.set_title("Histogram: 1 idea (privatize) -> 2% to 92% of peak")
-for i, v in enumerate([p0, p1]): ax.text(i, v, f"{v:.0f}%", ha="center", va="bottom", fontweight="bold")
-plt.show()
-""")
-
-# ----------------------------------------------------------------------------
-md(r"""
 ## Closing: the library is a frozen cost-model decision tree  (~3 min)
 
-Everything pointed one way. `thrust::sort` picks radix-vs-merge by *type*, at compile time. CUB ships *both* sorts and *both* a `BLOCK_HISTO_ATOMIC` and a `BLOCK_HISTO_SORT`. The experts didn't find *the* answer -- they encoded the **question** and a chooser, because the right choice is a function of the input and the chip.
+Everything pointed one way. The chip is a **bandwidth machine you keep fed by hiding latency with concurrency**; on top of that, `thrust::sort` picks radix-vs-merge by *type* at compile time, and CUB ships *both* sorts (and both an atomic and a sort-based histogram). The experts didn't find *the* answer -- they encoded the **question** and a chooser, because the right choice is a function of the input and the chip.
 
-So the one sentence the audience should leave with: **compute the cost model first.** Bytes moved, passes, arithmetic intensity, where the data lives, how you access it -- that arithmetic selects the algorithm, tells you when to stop tuning, and tells you which library call to make. On a GPU, that is the program; the kernel is a detail.
+So the one sentence to leave with: **compute the cost model first.** Bytes moved, passes, latency vs concurrency, where the data lives, how you access it -- that arithmetic selects the algorithm, tells you when to stop tuning, and tells you which library call to make. On a GPU, that is the program; the kernel is a detail.
 """)
 
 nb["cells"] = cells

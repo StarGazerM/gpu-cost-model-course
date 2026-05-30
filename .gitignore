@@ -40,3 +40,4 @@ __pycache__/
 cub_compare
 thrust_compare
 merge_ablation
+latency
