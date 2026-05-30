@@ -97,6 +97,14 @@ __global__ void copy(float4* out, const float4* in, size_t n) {
 """)
 md(r"""
 **Guess first** 🎲 -- GPU streaming copy vs CPU STREAM Triad: how many times faster? Write a number.
+
+<table style="width:100%"><tr><td style="width:50%;vertical-align:top"><b>GPU copy (independent loads)</b><pre>__global__ void copy(float4* o,
+          const float4* in, size_t n){
+  for(size_t i=tid;i&lt;n;i+=stride)
+    o[i] = in[i];
+}</pre></td><td style="width:50%;vertical-align:top"><b>CPU STREAM Triad</b><pre>#pragma omp parallel for
+for(size_t i=0;i&lt;n;i++)
+  a[i] = b[i] + s*c[i];</pre></td></tr></table>
 """)
 
 code(r"""
@@ -137,6 +145,10 @@ chase<1><<<1, 32*W>>>(...);   // ONE block = ONE SM (4 schedulers); sweep W = 1.
 """)
 md(r"""
 **Guess first** 🎲 -- it's a *single SM* (it can issue only 4 warps/clock). Going 1 -> 32 warps on it: flat, or faster? by how much?
+
+<table style="width:100%"><tr><td style="width:50%;vertical-align:top"><b>1 warp on ONE SM</b><pre>chase&lt;1&gt;&lt;&lt;&lt;1,   32&gt;&gt;&gt;(...);</pre></td><td style="width:50%;vertical-align:top"><b>32 warps on the SAME SM</b><pre>chase&lt;1&gt;&lt;&lt;&lt;1, 1024&gt;&gt;&gt;(...);</pre></td></tr></table>
+
+*(identical kernel -- only the launch width changes)*
 """)
 
 code(r"""
@@ -173,6 +185,10 @@ __global__ void stage(int* a, int n, int j, int k) {
 """)
 md(r"""
 **Guess first** 🎲 -- the *same* sort kernel on 64 MB vs 256 MB of keys: same throughput, or not? and why would it differ?
+
+<table style="width:100%"><tr><td style="width:50%;vertical-align:top"><b>64 MB (fits in 96 MB L2)</b><pre>bitonic_sort(d, 1&lt;&lt;24);</pre></td><td style="width:50%;vertical-align:top"><b>256 MB (exceeds L2)</b><pre>bitonic_sort(d, 1&lt;&lt;26);</pre></td></tr></table>
+
+*(identical kernel -- only the array size changes)*
 """)
 
 code(r"""
@@ -211,6 +227,11 @@ thrust::sort(d.begin(), d.end(), MyLess());   // -> merge  (custom comparator TY
 """)
 md(r"""
 **Guess first** 🎲 -- `thrust::sort(x)` vs `thrust::sort(x, MyLess())`. Same data, same ascending order, a comparator that *means* `a < b`. Same speed? If not, which way, and how much?
+
+<table style="width:100%"><tr><td style="width:50%;vertical-align:top"><b>thrust::sort(x)</b><pre>thrust::sort(d.begin(), d.end());</pre></td><td style="width:50%;vertical-align:top"><b>thrust::sort(x, MyLess())</b><pre>struct MyLess {
+  bool operator()(int a,int b){return a&lt;b;}
+};
+thrust::sort(d.begin(), d.end(), MyLess());</pre></td></tr></table>
 """)
 
 code(r"""
@@ -245,6 +266,10 @@ cub::DeviceRadixSort::SortKeys(d_temp, bytes, d_in, d_out, n);
 """)
 md(r"""
 **Guess first** 🎲 -- a *world-class* comparison sort (CUB merge) vs CUB radix, both at 1 GB: which wins, and by how much?
+
+<table style="width:100%"><tr><td style="width:50%;vertical-align:top"><b>CUB merge (comparison)</b><pre>cub::DeviceMergeSort::SortKeys(
+   tmp, sz, d, n, less);</pre></td><td style="width:50%;vertical-align:top"><b>CUB radix</b><pre>cub::DeviceRadixSort::SortKeys(
+   tmp, sz, d_in, d_out, n);</pre></td></tr></table>
 """)
 
 code(r"""
@@ -289,6 +314,10 @@ __device__ int merge_path(const int* A,int aN,const int* B,int bN,int diag){
 """)
 md(r"""
 **Guess first** 🎲 -- merge sort with 1 vs 16 items/thread (register blocking). Does it even matter at GB scale, on a chip with a 96 MB L2 and fast shared atomics?
+
+<table style="width:100%"><tr><td style="width:50%;vertical-align:top"><b>1 item / thread</b><pre>nvcc -DIPT=1  merge_ablation.cu</pre></td><td style="width:50%;vertical-align:top"><b>16 items / thread (register-blocked)</b><pre>nvcc -DIPT=16 merge_ablation.cu</pre></td></tr></table>
+
+*(same source -- only ITEMS_PER_THREAD changes)*
 """)
 
 code(r"""
@@ -328,6 +357,12 @@ for (int i = 0; i < N; ++i) {
 """)
 md(r"""
 **Guess first** 🎲 -- the *identical* sort kernel, but `cudaMalloc`/`Free` every iteration vs `cudaMallocAsync`: how much does *just the allocator* cost?
+
+<table style="width:100%"><tr><td style="width:50%;vertical-align:top"><b>cudaMalloc per iteration</b><pre>cudaMalloc(&amp;d, bytes);
+sort(d, n, s);
+cudaFree(d);</pre></td><td style="width:50%;vertical-align:top"><b>cudaMallocAsync (pool)</b><pre>cudaMallocAsync(&amp;d, bytes, s);
+sort(d, n, s);
+cudaFreeAsync(d, s);</pre></td></tr></table>
 """)
 
 code(r"""
