@@ -46,3 +46,4 @@ radix_passes
 latency
 divergence
 warp_sort
+cub_ablate

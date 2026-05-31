@@ -181,13 +181,75 @@ __global__ void merge_runs_smem(const int* __restrict__ in, int* __restrict__ ou
   }
 }
 
+#if OPT >= 4
+// --- OPT=4: split the scattered work OUT of the merge. A tiny PARTITION kernel does
+// the block-level co-rank binary searches (the only non-streaming reads) and writes
+// each tile's A-split to a global array. The MERGE kernel then reads those splits --
+// no binary search -- so it is PURE streaming: coalesced load -> shared merge ->
+// coalesced store. This is exactly cub's DeviceMergeSortPartitionKernel + MergeKernel.
+__global__ void partition_kernel(const int* __restrict__ in, size_t n, size_t run,
+                                 int* __restrict__ parts) {
+  size_t t = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+  size_t out_base = t * OUT_TILE;
+  if (out_base >= n) return;
+  size_t base = (out_base / (2 * run)) * (2 * run);
+  const int* A = in + base;
+  const int* B = in + base + run;
+  int g0 = (int)(out_base - base);
+  parts[t] = merge_path(A, (int)run, B, (int)run, g0);   // the scattered binary search, isolated
+}
+
+__global__ void merge_runs_part(const int* __restrict__ in, int* __restrict__ out,
+                                size_t n, size_t run, const int* __restrict__ parts) {
+  __shared__ int sA[OUT_TILE];
+  __shared__ int sB[OUT_TILE];
+  __shared__ int sO[OUT_TILE];
+  int tid = threadIdx.x;
+  size_t t = blockIdx.x;
+  size_t out_base = t * OUT_TILE;
+  if (out_base >= n) return;
+  size_t base = (out_base / (2 * run)) * (2 * run);
+  const int* A = in + base;
+  const int* B = in + base + run;
+  int rn = (int)run;
+  int g0 = (int)(out_base - base), g1 = g0 + OUT_TILE;
+  int a0 = parts[t];                                    // precomputed -- NO global binary search
+  int a1 = (g1 < 2 * rn) ? parts[t + 1] : rn;           // next tile's split, or end of A at group edge
+  int b0 = g0 - a0, b1 = g1 - a1;
+  int aCount = a1 - a0, bCount = b1 - b0;
+  for (int i = tid; i < aCount; i += BLOCK) sA[i] = A[a0 + i];   // coalesced
+  for (int i = tid; i < bCount; i += BLOCK) sB[i] = B[b0 + i];
+  __syncthreads();
+  int local = tid * SPT;
+  int pa = merge_path(sA, aCount, sB, bCount, local);           // per-thread co-rank in SHARED (cheap)
+  int pb = local - pa;
+#pragma unroll
+  for (int k = 0; k < SPT; ++k) {
+    if (pb >= bCount || (pa < aCount && sA[pa] <= sB[pb])) sO[local + k] = sA[pa++];
+    else sO[local + k] = sB[pb++];
+  }
+  __syncthreads();
+  for (int i = tid; i < OUT_TILE; i += BLOCK) {                 // coalesced store
+    size_t idx = out_base + i;
+    if (idx < n) out[idx] = sO[i];
+  }
+}
+#endif
+
 static int* merge_sort(int* d, int* d2, size_t n) {
   block_sort<<<(int)(n / TILE), BLOCK>>>(d, n);
   int *in = d, *out = d2;
+  int num_tiles = (int)((n + OUT_TILE - 1) / OUT_TILE);
+#if OPT >= 4
+  int* parts = nullptr;
+  cudaMalloc(&parts, ((size_t)num_tiles + 1) * sizeof(int));   // reused across passes
+#endif
   for (size_t run = TILE; run < n; run *= 2) {
-#if OPT >= 3
-    int grid = (int)((n + OUT_TILE - 1) / OUT_TILE);
-    merge_runs_smem<<<grid, BLOCK>>>(in, out, n, run);
+#if OPT >= 4
+    partition_kernel<<<(num_tiles + BLOCK - 1) / BLOCK, BLOCK>>>(in, n, run, parts);
+    merge_runs_part<<<num_tiles, BLOCK>>>(in, out, n, run, parts);
+#elif OPT == 3
+    merge_runs_smem<<<num_tiles, BLOCK>>>(in, out, n, run);
 #else
     int mblk = 256;
     int grid = (int)(((n + SPT - 1) / SPT + mblk - 1) / mblk);
@@ -195,6 +257,9 @@ static int* merge_sort(int* d, int* d2, size_t n) {
 #endif
     std::swap(in, out);
   }
+#if OPT >= 4
+  cudaFree(parts);
+#endif
   return in;
 }
 
@@ -222,7 +287,7 @@ int main(int argc, char** argv) {
     merge_sort(d, d2, n);
   });
   double d2d = bytes / 810e9 * 1e3;
-  const char* lbl[] = {"baseline", "+coalesce-load", "+vectorize", "+coalesce-merge"};
+  const char* lbl[] = {"baseline", "+coalesce-load", "+vectorize", "+coalesce-merge", "+partition-kernel"};
   printf("merge OPT=%d %-16s n=2^%d  %8.3f ms  %8.1f Mkeys/s  [%s]\n",
          OPT, lbl[OPT], log2n, ms - d2d, n / 1e6 / ((ms - d2d) / 1e3),
          ok ? "PASS" : "FAIL");
