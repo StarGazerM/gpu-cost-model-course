@@ -98,7 +98,54 @@ The catch that makes or breaks everything: bandwidth only materializes if a warp
 
 The point of the image: "cores" you can count are SMs; the thing called a CUDA core is a sliver of a sub-partition; the L2 and the memory PHYs are *enormous* — because this is a memory machine.
 
-### 0.8 The mental model, one paragraph
+### 0.8 Read the spec sheet like an architect (and how to buy a GPU)
+
+Now make it concrete: pull the real card's numbers and read each one *through the cost model*. Two commands tell you almost everything — if you know which lines are load-bearing.
+
+**`nvidia-smi`** — the *operator's* view (driver, power, thermals, who's using it):
+
+```text
+NVIDIA-SMI 580.159.03    Driver 580.159.03    CUDA Version: 13.0
+| NVIDIA RTX 6000 Ada Generation        | Bus 0000:51:00.0      |
+| 30%  39C  P8   27W / 300W  | 38MiB / 49140MiB | 0% Default     |
+```
+
+How to read it: **300 W** power cap (boost clocks are *thermal/power*-limited → sustained ≠ peak), **48 GB** (49140 MiB) framebuffer, **P8** = idle power state, **0 %** util, ~**39 °C**. `nvidia-smi -q` adds **PCIe Gen4 ×16** (your host↔device pipe ≈ 32 GB/s — the §8 rug-pull bottleneck), **BAR1 64 GB** (resizable BAR — CPU can map *all* of VRAM), and ECC state. Note what is *not* here: none of the numbers that predict kernel speed.
+
+**`deviceQuery` / `cudaGetDeviceProperties`** — the *architect's* view (what the cost model actually needs):
+
+```text
+NVIDIA RTX 6000 Ada Generation   sm_89 (Ada Lovelace)
+SMs: 142   maxThreads/SM: 1536  -> 48 warps/SM        # the cores, and the concurrency budget
+regs/SM: 65536 (256 KB)   sharedMem/SM: 100 KB         # occupancy = regfile / (regs/thread x 32)
+L2: 96 MB    sharedMem/block: 48 KB (opt-in ~100 KB)   # the cache-cliff size (Part 5)
+mem: 384-bit x 20 Gbps GDDR6  ->  960 GB/s             # THE headline number
+core boost: 2505 MHz     "CUDA cores": 142 x 128 = 18176
+```
+
+Read each line against a concept we built:
+- **142 SMs × 128 lanes = 18,176 "cores"** — i.e. 18,176 *ALUs* (0.3), not 18,176 processors.
+- **48 warps/SM, 256 KB regfile/SM** — your **occupancy** ceiling; a register-hungry kernel fits fewer warps → hides less latency (0.5, §3). This is the knob, not a constant.
+- **100 KB shared/SM** — the managed scratchpad and its banks (0.6); also caps tile sizes in §7b.
+- **96 MB L2** — exactly the **cache cliff** boundary: a benchmark under 96 MB lies (§5).
+- **384-bit × 20 Gbps = 960 GB/s** — the **headline**. For memory-bound work this single number *is* your speed ceiling (roofline floor = bytes ÷ 960 GB/s).
+- The **whitepaper** (AD102) adds peak FP32/FP64/tensor TFLOPS and per-SM unit counts — useful for compute-bound work, but the *least* predictive lines for the data workloads this course targets.
+
+**The concrete takeaway — how to buy a GPU, given the cost model.** Rank the spec lines by what actually bounds *your* workload:
+
+| Your workload is… | The spec that decides it | What to ignore |
+|---|---|---|
+| **Memory-bound** (sort, scan, join, GNN, most DB/analytics) | **GB/s** (memory bandwidth) + does the working set **fit in VRAM** | peak TFLOPS, "CUDA cores" |
+| **Capacity-bound** (big models/graphs) | **VRAM** first (48 GB here); a spill to PCIe (~32 GB/s) is death | clock speed |
+| **Compute-bound** (GEMM / ML training) | tensor throughput **and** bandwidth balance (arithmetic intensity) | — |
+| **Latency/occupancy-bound** | SM count × warps/SM = concurrency you can keep in flight | boost clock |
+
+- **Marketing vs. predictive:** "18,176 CUDA cores" and peak TFLOPS are the *least* predictive numbers for data work; the predictive ones are **GB/s, VRAM, L2 size, and PCIe generation**. Boost clock is power-capped (300 W) — **sustained ≠ peak**.
+- **The one-liner for this audience:** for DB/systems/data workloads, **a GPU is a bandwidth-and-capacity purchase, not a FLOPS purchase.** If you're memory-bound — and you usually are — the GB/s on the box is your speed, and VRAM decides whether the job runs at all.
+
+That is the practical synthesis of the whole hour: the spec-sheet line that predicts your runtime is the one the cost model points at.
+
+### 0.9 The mental model, one paragraph
 
 **A GPU SM is like a CPU core with a 32-wide SIMD unit (×4 sub-partitions) and ~48-way hyperthreading — minus the out-of-order engine and branch predictor.** It trades single-thread latency for throughput, hides the resulting latency by switching among dozens of resident warps (free, because their registers all live on-chip), and delivers its enormous memory bandwidth *only* to code whose lanes access memory contiguously. Program it well and you are not "writing parallel code"; you are **budgeting bytes, passes over memory, and in-flight concurrency** — which is the rest of this talk.
 
@@ -321,5 +368,6 @@ What *must* be conveyed for the demos not to confuse:
 - [ ] **0.4 predication/divergence** before §4's 2× measurement.
 - [ ] **0.5 oversubscription + zero-overhead switch** before §3's single-SM proof.
 - [ ] **0.6 coalescing + bank conflicts** before §5's cliff and §7b's profiler.
-- [ ] **0.8 mapping paragraph** as the thing they write down and keep.
+- [ ] **0.8 spec sheet** — read the *real* `nvidia-smi` / `deviceQuery` numbers through the cost model; land the "buy for GB/s + VRAM, not FLOPS" takeaway.
+- [ ] **0.9 mapping paragraph** as the thing they write down and keep.
 - [ ] Die shot used *once*, early, to make "cores = SMs" physical.
