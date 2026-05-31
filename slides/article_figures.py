@@ -173,6 +173,38 @@ def f_coalesce():
     save(fig, "06b_coalescing.png")
 
 
+# 0.2b -- addressing: SIMD (1 base -> contiguous) vs SIMT (32 per-lane addresses -> coalesce)
+def f_addressing():
+    fig, (a, b) = plt.subplots(2, 1, figsize=(10, 4.6))
+    for ax in (a, b):
+        ax.set_xlim(0, 34); ax.set_ylim(0, 4); ax.axis("off")
+    # SIMD: one address register -> one contiguous load
+    a.set_title("SIMD: ONE base address -> ONE contiguous transaction", fontsize=10.5, color=COOL)
+    box(a, 0.5, 2.7, 4.5, 0.9, COOL, "1 address reg", fs=9)
+    a.add_patch(FancyArrow(5.2, 3.15, 1.4, 0, width=0.04, head_width=0.3, color=INK))
+    for i in range(16):
+        box(a, 7 + i * 1.0, 2.7, 0.9, 0.9, COOL, ec="white", lw=0.5)
+    a.add_patch(Rectangle((7, 1.4), 16, 0.7, facecolor=COOL, edgecolor="white", alpha=0.5))
+    a.text(15, 1.75, "1 transaction (must be contiguous; gather needs a special slow instr)",
+           ha="center", color=INK, fontsize=8.5)
+    # SIMT: 32 per-lane address registers -> hardware coalesces
+    b.set_title("SIMT: 32 per-lane address registers -> hardware coalesces at runtime", fontsize=10.5, color=GPU)
+    for i in range(16):
+        box(b, 0.5 + i * 0.62, 2.7, 0.5, 0.9, "#b07b16", ec="white", lw=0.5)
+    b.text(5.4, 1.9, "32 addresses\n(each lane its own)", ha="center", color=INK, fontsize=8)
+    b.add_patch(FancyArrow(10.6, 3.15, 1.2, 0, width=0.04, head_width=0.3, color=INK))
+    # contiguous -> 1 txn (green) ; scattered -> many (red)
+    for i in range(8):
+        box(b, 13 + i * 0.95, 2.7, 0.85, 0.9, GPU, ec="white", lw=0.5)
+    b.add_patch(Rectangle((13, 1.5), 7.6, 0.6, facecolor=GPU, edgecolor="white", alpha=0.5))
+    b.text(16.8, 1.05, "contiguous -> 1 txn", ha="center", color=GPU, fontsize=8.5, fontweight="bold")
+    for i in range(8):
+        box(b, 22 + i * 1.4, 2.7, 0.85, 0.9, HOT, ec="white", lw=0.5)
+        b.add_patch(Rectangle((22 + i * 1.4, 1.5), 0.85, 0.6, facecolor=HOT, edgecolor="white", alpha=0.5))
+    b.text(27, 1.05, "strided -> many txns", ha="center", color=HOT, fontsize=8.5, fontweight="bold")
+    save(fig, "02b_addressing.png")
+
+
 if __name__ == "__main__":
-    f_area(); f_simt(); f_hierarchy(); f_divergence(); f_latency(); f_mem(); f_coalesce()
+    f_area(); f_simt(); f_addressing(); f_hierarchy(); f_divergence(); f_latency(); f_mem(); f_coalesce()
     print("done ->", OUT)

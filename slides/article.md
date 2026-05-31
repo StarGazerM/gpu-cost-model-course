@@ -38,6 +38,31 @@ Why design it this way? **Because the control plane is what costs area on a CPU.
 
 *(Aside, only if asked: other vendors pick other widths — AMD wave32/wave64 — and have their own vector-register story. The principle is identical: amortize one front-end across a lane array. I'll keep everything NVIDIA-concrete to avoid a terminology swamp.)*
 
+### 0.2b Why per-lane registers (not one wide one): data loads, coalescing, and the cache trade-off
+
+Slow down here — this is *why* the GPU is built the way it is, and it drives the whole cost model. Three linked facts.
+
+**(1) Per-lane registers ⇒ per-lane addresses ⇒ memory is a hardware *gather*.** A SIMD vector load takes **one** base address and reads a **contiguous** run (16 adjacent floats). The lanes are bolted together — they *must* be neighbours in memory. A SIMT load is different: each lane has its *own* address register, so a warp's load is **32 independent addresses**. The hardware **coalesces** them at runtime — if the 32 are contiguous it fuses them into one wide transaction; if scattered it issues several. So you write plain scalar code — `x = a[idx]` with a per-thread `idx` — and **data-dependent, irregular indexing (`a[b[i]]`, gathers, hash/tree/graph probes) just works**: the hardware turns 32 scalar addresses into the right transactions. SIMD needs explicit, slow gather instructions for that. *This is the real reason data-parallel-but-irregular work maps onto SIMT and not AVX.*
+
+**(2) The cost: per-lane registers replicate data.** In `c[i] = a[i] + b[i]`, the base pointers `a, b, c` hold the **same value in all 32 lanes** (redundant ×32), and `i` differs only trivially (128, 129, 130…). A CPU keeps `a, b, c` **once** in scalar registers and only the short vector in a vector register; SIMT keeps 32 copies — it "wastes registers and power" on redundancy, and therefore needs a **far larger register file** than SIMD for the same kernel.
+
+**(3) Why that's the design, not a bug — the register file IS the latency-hiding mechanism.** The GPU doesn't hide DRAM latency with out-of-order execution or big per-thread caches; it hides it by keeping **many warps resident and switching to a ready one the instant one stalls** — free, because every resident warp's registers physically live on-chip (§0.5). Holding all that state *requires* an enormous register file. So the "wasteful" per-lane registers are exactly what buys latency hiding: **the register file is to the GPU what OoO + caches are to the CPU.** (GPU registers are "more like memory than CPU registers" — a big banked on-chip RAM.)
+
+**The trade-off, as a budget.** Both chips face the same enemy (DRAM is hundreds of cycles away) and a fixed SRAM budget; they spend it oppositely:
+
+| | CPU | GPU |
+|---|---|---|
+| Hide latency by… | **caches + OoO + prefetch** (reuse & run-ahead in one thread) | **switching among many resident warps** |
+| Biggest on-chip SRAM goes to… | **cache** | **the register file** (holds every resident warp) |
+| Cache **per thread** | megabytes | a few hundred **bytes** (one L2 shared by ~200k resident threads) |
+| So memory must be… | cache-friendly (temporal locality) | **bandwidth-friendly (coalesced streaming)** |
+
+That bottom row is the punchline: because the GPU has almost **no cache per thread**, it cannot lean on a thread's working set staying cached the way a CPU does — it must **stream from DRAM at high bandwidth, which only works if accesses coalesce**, which is exactly what the per-lane-address model enables. SIMT (per-lane registers), latency-hiding-by-multithreading (huge register file), and coalesced bandwidth (per-lane addresses) are **one coherent design** — and CPU-style wide-register SIMD + big caches + OoO is the *other* coherent point in the same space. You don't get to mix-and-match.
+
+**The 32 isn't arbitrary:** 32 lanes × 4-byte elements = **128 bytes = one memory transaction / L2 cache line**. Warp width is co-designed with the transaction size, so a *coalesced* 32-lane load is exactly *one* transaction — the bridge from "32 separate registers" straight to "data load" and "cache line."
+
+![SIMD load: one base address -> one contiguous transaction. SIMT load: 32 per-lane addresses the hardware coalesces (contiguous -> 1 transaction) or scatters (strided -> many).](figures/02b_addressing.png)
+
 ### 0.3 The terminology minefield — fix it now or lose them later
 
 GPU vocabulary is genuinely bad (partly marketing). Pin it down **once**, on a slide, and use the disambiguated words for the rest of the hour:
@@ -75,7 +100,7 @@ So how does the chip stay busy? **Concurrency.** Each SM keeps **many warps resi
 
 The other half of the throughput bet is memory **bandwidth**. Our chip's GDDR6 moves ~**960 GB/s**; a CPU's DRAM is ~100 GB/s. The hierarchy, fastest→slowest:
 
-- **Registers** — per-lane, and in *aggregate the largest on-chip memory* (~36 MB across the chip). Counterintuitive to a CPU person: the register file is bigger than the L2.
+- **Registers** — per-lane, and in aggregate **~36 MB across the chip** (256 KB/SM × 142). That's *orders of magnitude* more register storage than any CPU — because it must hold every resident warp's state (§0.2b). (Historically the register file out-sized the L2; Ada is the exception — NVIDIA grew its L2 to a huge 96 MB, so here L2 > regfile. Both are enormous on-chip SRAM, spent on the GPU's two latency strategies: registers for multithreading, L2 for reuse/coalescing.)
 - **Shared memory** — a per-SM, **programmer-managed scratchpad** (not a cache). ~100 KB/SM, organized in 32 **banks**; if lanes of a warp hit the same bank, accesses **serialize** (a *bank conflict* — the "conflicts" to watch).
 - **L1 / L2 cache** — L2 is a big shared band (~96 MB here).
 - **HBM/GDDR** — high bandwidth, high latency.
