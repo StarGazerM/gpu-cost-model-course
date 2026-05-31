@@ -1,27 +1,35 @@
 // Using the lanes (the right way): 32 lanes cooperatively sort 32 values with
-// NOTHING but register-to-register shuffles -- no `if` (branchless min/max), no
-// shared memory. This is the sorting-NETWORK idea (same as net_sort) but ACROSS
-// the warp's lanes. It's how lanes cooperate when there's no latency to hide.
+// NOTHING but register-to-register shuffles -- no shared memory, no __syncthreads,
+// and only data-OBLIVIOUS selects (no data-dependent branch -> no divergence).
+//
+// This is LITERALLY net_sort (demo6's per-thread odd-even network) turned sideways:
+//   net_sort:        for i: for j=(i&1); j+1<N; j+=2:  compare a[j], a[j+1]   (down ONE thread's registers)
+//   warp_oddeven:    for i: each lane compares with neighbor lane^... (phase i&1) (ACROSS the warp's 32 lanes)
+// Same odd-even transposition network, same N rounds; only the axis differs --
+// registers vs lanes, the two faces of a "thread".
 #include <cstdio>
 #include <vector>
 #include <random>
 #include <algorithm>
 #define CK(c) do{cudaError_t e=(c); if(e){printf("CUDA %s\n",cudaGetErrorString(e));return 1;}}while(0)
 
-__device__ int warp_bitonic_sort(int v) {
+__device__ int warp_oddeven_sort(int v) {            // each lane holds ONE value v
   int lane = threadIdx.x & 31;
-  for (int k = 2; k <= 32; k <<= 1)
-    for (int j = k >> 1; j > 0; j >>= 1) {
-      int partner = __shfl_xor_sync(0xffffffffu, v, j);   // read lane^j's register
-      bool keep_min = ((lane & j) == 0) == ((lane & k) == 0);
-      v = keep_min ? min(v, partner) : max(v, partner);    // branchless
-    }
-  return v;
+  for (int i = 0; i < 32; ++i) {                      // N rounds, exactly like net_sort's outer loop
+    int phase   = i & 1;                              // even rounds pair (0,1)(2,3)..., odd rounds (1,2)(3,4)...
+    bool is_low = ((lane & 1) == phase);              // am I the LOWER element of my pair this round?
+    int partner = is_low ? lane + 1 : lane - 1;       // the neighbor lane I compare-exchange with
+    bool active = (unsigned)partner < 32u;            // edge lanes (0 / 31) sit out some rounds
+    int pv  = __shfl_sync(0xffffffffu, v, active ? partner : lane);  // read neighbor's register
+    int lo  = min(v, pv), hi = max(v, pv);            // branchless compare-exchange
+    v = active ? (is_low ? lo : hi) : v;              // data-oblivious selects -> no divergence
+  }
+  return v;                                           // warp's 32 values now sorted across lanes
 }
 
 __global__ void warp_sort(int* g) {
   int t = blockIdx.x * blockDim.x + threadIdx.x;
-  g[t] = warp_bitonic_sort(g[t]);   // each warp sorts its 32 contiguous values
+  g[t] = warp_oddeven_sort(g[t]);   // each warp sorts its 32 contiguous values
 }
 
 int main() {
@@ -42,8 +50,8 @@ int main() {
     std::sort(ref.begin(), ref.end());
     for (int i = 0; i < 32; ++i) if (out[w + i] != ref[i]) ok = false;
   }
-  printf("32 lanes sorting 32 values via __shfl_xor only -- no if, no shared mem: [%s]\n",
+  printf("32 lanes sorting 32 values via __shfl only -- no shared mem, no divergence: [%s]\n",
          ok ? "PASS" : "FAIL");
-  printf("  this is net_sort's sorting network, but ACROSS lanes -- lanes cooperating.\n");
+  printf("  this is net_sort's odd-even network (demo6), turned ACROSS lanes -- lanes cooperating.\n");
   return ok ? 0 : 1;
 }

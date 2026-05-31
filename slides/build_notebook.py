@@ -199,20 +199,23 @@ This is the leaky abstraction CUDA's language papers over: a "thread" is **somet
 """)
 
 md(r"""
-**Lockstep isn't only a tax -- it's also a tool.** If 32 lanes always run the same instruction, then a lane can *read a neighbour lane's register directly* with a shuffle (`__shfl_xor`) -- no shared memory, no `__syncthreads`, no `if`. The lanes stop being a hazard and start **cooperating**: they run a fixed sorting **network** (branchless min/max compare-exchanges on a data-oblivious schedule), so every lane executes the identical instruction stream and the lockstep is free.
+**Lockstep isn't only a tax -- it's also a tool.** If 32 lanes always run the same instruction, then a lane can *read a neighbour lane's register directly* with a shuffle (`__shfl`) -- no shared memory, no `__syncthreads`, no data-dependent `if`. The lanes stop being a hazard and start **cooperating**: they run a fixed sorting **network** (branchless min/max compare-exchanges on a *data-oblivious* schedule), so every lane executes the identical instruction stream and the lockstep is free.
 
-Below, 32 lanes sort their 32 values using *only* register-to-register shuffles. This is exactly the per-thread sorting network you'll see in §5b (`net_sort`) -- but turned **sideways, across the warp's lanes** instead of across one thread's registers.
+Below, 32 lanes sort their 32 values using *only* register-to-register shuffles. This is **literally `net_sort` from §5b** -- the same odd-even transposition network, same `N` rounds -- just turned **sideways: across the warp's 32 lanes instead of down one thread's registers.** (The per-thread `net_sort` is exactly CUB's `StableOddEvenSort`; this is that network walked across lanes.)
 
 ```cpp
-__device__ int warp_bitonic_sort(int v) {          // each lane holds ONE value v
+__device__ int warp_oddeven_sort(int v) {           // each lane holds ONE value v
   int lane = threadIdx.x & 31;
-  for (int k = 2; k <= 32; k <<= 1)
-    for (int j = k >> 1; j > 0; j >>= 1) {
-      int partner = __shfl_xor_sync(0xffffffffu, v, j);   // read lane^j's register
-      bool keep_min = ((lane & j) == 0) == ((lane & k) == 0);
-      v = keep_min ? min(v, partner) : max(v, partner);    // branchless -> no divergence
-    }
-  return v;                                          // warp's 32 values now sorted
+  for (int i = 0; i < 32; ++i) {                     // N rounds -- net_sort's outer loop
+    int phase   = i & 1;                             // even rounds pair (0,1)(2,3)..., odd (1,2)(3,4)...
+    bool is_low = ((lane & 1) == phase);             // am I the lower element of my pair?
+    int partner = is_low ? lane + 1 : lane - 1;      // neighbour lane to compare-exchange with
+    bool active = (unsigned)partner < 32u;           // lanes 0/31 sit out some rounds
+    int pv = __shfl_sync(0xffffffffu, v, active ? partner : lane);
+    int lo = min(v, pv), hi = max(v, pv);            // branchless compare-exchange
+    v = active ? (is_low ? lo : hi) : v;             // data-oblivious selects -> no divergence
+  }
+  return v;                                          // warp's 32 values now sorted across lanes
 }
 ```
 """)
@@ -368,7 +371,7 @@ template <int IPT> __global__ void block_sort(int* g, ...) {
 // IPT=16: 16 keys sorted per thread in registers before any shared/global trip.
 ```
 
-**What `net_sort` is** (the per-thread sort): the **same sorting network we met in §2b** -- a *fixed*, branchless sequence of min/max compare-exchanges -- but now run *down one thread's `IPT` registers* instead of *across the warp's 32 lanes*. It is **data-oblivious** (the very same comparisons run regardless of the values), so there are no branches; all 32 lanes of a warp execute it in **lockstep with zero divergence**, each sorting its own registers. A normal comparison sort's `if`s would make lanes diverge and serialize; a network never does -- which is *why* it's the right per-thread sort on a SIMD machine. (§2b's `__shfl` version and this register version are the same idea on the two faces of a thread.)
+**What `net_sort` is** (the per-thread sort): the **same odd-even network we met in §2b** -- a *fixed*, branchless sequence of min/max compare-exchanges -- but now run *down one thread's `IPT` registers* instead of *across the warp's 32 lanes*. This is **exactly CUB's `StableOddEvenSort`** (`cub/thread/thread_sort.cuh`); CUB keeps an `if`-swap to stay stable and carry value payloads, we use branchless min/max for a keys-only sort. It is **data-oblivious** (the very same comparisons run regardless of the values), so there are no branches; all 32 lanes of a warp execute it in **lockstep with zero divergence**, each sorting its own registers. A normal comparison sort's `if`s would make lanes diverge and serialize; a network never does -- which is *why* it's the right per-thread sort on a SIMD machine. (§2b's `__shfl` version and this register version are the *same network* on the two faces of a thread.)
 
 ```cpp
 // odd-even sorting network on IPT registers: branchless compare-exchanges only
