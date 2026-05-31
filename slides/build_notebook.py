@@ -392,21 +392,19 @@ plt.tight_layout(); plt.show()
 """)
 
 md(r"""
-### 5b-ii. Merge -- the optimization: register blocking & ILP  (~6 min)
+### 5b-ii. Merge -- the optimization: iterate down from CUB  (~6 min)
 
-We have a *correct* parallel merge sort. Now the one *hardware* lever that makes it fast -- and it's the same latency story as §2, moved inside a thread.
-
-**The hardware lever: register blocking** -- dialed by one number, **`ITEMS_PER_THREAD` (IPT)**: how many keys each thread holds and sorts in registers (level 1) before touching shared/global. The surface reason is "registers are the fastest, and chip-wide the *largest* (~36 MB), on-chip memory." But that can't be the whole story -- IPT=1 uses registers too. The deep reason it keeps paying at GB scale, where a 96 MB L2 should hide every latency, is **ILP**.
+We have a *correct* merge sort. Here it is with **all of CUB's optimizations written out** as plain kernels -- 256 threads, **17 items/thread**, a **warp-transpose coalesced** load, and a **tiled co-rank merge with its own partition kernel** -- and **none** of CUB's `policy_hub` / `DispatchMergeSort` template machinery. Unfolded like this (`demo6_mergesort/merge_cub.cu`) it **matches `cub::DeviceMergeSort`** (50 vs 48 ms). Three opts carry it:
 
 ```cpp
-// register blocking: each thread holds IPT keys and sorts them IN REGISTERS first.
-template <int IPT> __global__ void block_sort(int* g, ...) {
-  int keys[IPT];                                 // <-- IPT independent registers
-  for (int i=0;i<IPT;++i) keys[i] = g[base + tid*IPT + i];   // IPT independent loads
-  net_sort(keys);                                // sort this thread's IPT keys in registers
-  /* ...then merge across threads through shared memory (level 2)... */
-}
+// (1) coalesced load + (2) register blocking (17 items/thread), via cub's block primitives:
+cub::BlockLoad     <int,256,17, BLOCK_LOAD_WARP_TRANSPOSE >(...).Load (g+base, keys, valid, INT_MAX);
+cub::BlockMergeSort<int,256,17 >(...).Sort(keys, LessOp());     // per-thread net_sort + shared MergePath
+cub::BlockStore    <int,256,17, BLOCK_STORE_WARP_TRANSPOSE>(...).Store(g+base, keys, valid);
+// (3) device merge per pass: a tiny PARTITION kernel (co-rank) + a tiled, coalesced MERGE kernel.
 ```
+
+Because this **starts at CUB's speed**, we can do the rigorous thing -- *remove one opt at a time and measure*, so each delta is that opt's real worth with nothing left unexplained (the build-up direction always leaves "what else?"). First two pieces up close: the **per-thread sort** (a branchless network) and the **ILP** behind items/thread; then we iterate down.
 
 `net_sort` is the **same odd-even network from §2b** -- a fixed, branchless min/max compare-exchange schedule -- run *down one thread's `IPT` registers* instead of *across the warp's 32 lanes*. It is **exactly CUB's `StableOddEvenSort`** (`cub/thread/thread_sort.cuh`; CUB keeps an `if`-swap to stay stable and carry payloads, we use branchless min/max, keys-only). This is where §2b's **divergence tax gets paid off**: a network is **data-oblivious** -- the comparisons don't depend on the values -- so there is no data-dependent branch to diverge on, and all 32 lanes run it in lockstep. And "branchless" isn't even something *you* must write: a data-oblivious `if`-swap has nothing to diverge on, so `ptxas` **predicates it to the identical SASS**. Proof -- compile the network both ways and diff the cubin:
 
@@ -481,28 +479,30 @@ plt.tight_layout(); plt.show()
 """)
 
 md(r"""
-**Guess first** 🎲 -- merge sort with 1 vs 16 items/thread (register blocking). Does pushing work into registers even matter at GB scale, on a chip with a 96 MB L2?
-
-<table style="width:100%"><tr><td style="width:50%;vertical-align:top"><b>1 item / thread</b><pre>nvcc -DIPT=1  merge_ablation.cu</pre></td><td style="width:50%;vertical-align:top"><b>16 items / thread (register-blocked)</b><pre>nvcc -DIPT=16 merge_ablation.cu</pre></td></tr></table>
-
-*(same source -- only ITEMS_PER_THREAD changes)*
+**Guess first** 🎲 -- start from the CUB-matching merge and **remove one opt**. Which removal hurts most: coalescing the block-sort load, the **tiled** (coalesced) device merge, or dropping items/thread 17->1?
 """)
 
 code(r"""
-# register-blocking ablation: rebuild merge sort with IPT 1..16 and sort 1 GB
+# iterate DOWN from the unfolded-CUB merge -- each config removes ONE opt (a -D toggle).
+cfgs = [("FULL\n(=CUB)", ""), ("-coalesce\nblock load", "-DDIRECTLOAD"),
+        ("-tiled\ndevice merge", "-DTILED=0"), ("-items\n17->8", "-DIPT=8"), ("-items\n17->1", "-DIPT=1")]
 res = {}
-for ipt in [1, 2, 4, 8, 16]:
-    sh(f"cd demo6_mergesort && nvcc -O3 -std=c++17 -arch=sm_89 -DIPT={ipt} -o /tmp/m{ipt} merge_ablation.cu")
-    res[ipt] = grab(sh(f"/tmp/m{ipt} 28 6", cwd=f"{ROOT}/demo6_mergesort"), r"([\d.]+)\s*Mkeys/s")
-fig, ax = plt.subplots(figsize=(6.2, 4))
-ax.plot(list(res), list(res.values()), "o-", color=MERGE, lw=2.2, ms=8, mfc="white", mew=2)
-ax.set_xscale("log", base=2); ax.set_xlabel("ITEMS_PER_THREAD (register blocking)")
-ax.set_ylabel("Mkeys/s (2^28, 1 GB)")
-lo, hi = res[1], res[16]
-ax.set_title(f"Register blocking climbs {hi/lo:.2f}x at GB scale -- a real, gradual step")
-plt.show()
-print("NOT flat: more items/thread -> more independent loads in flight (ILP/MLP), so the")
-print("climb survives even past the 96 MB L2. The lever is concurrency-in-a-thread, not cache.")
+for name, flag in cfgs:
+    sh(f"nvcc -O3 -std=c++17 -arch=sm_89 {flag} -o /tmp/mcx merge_cub.cu", cwd=f"{ROOT}/demo6_mergesort")
+    res[name] = grab(sh("/tmp/mcx 28 10", cwd=f"{ROOT}/demo6_mergesort"), r"([\d.]+)\s*ms")
+cub = grab(sh("./cub_compare 28 6", cwd=f"{ROOT}/demo6_mergesort"), r"merge sort :\s*([\d.]+)")
+fig, ax = plt.subplots(figsize=(8.2, 4))
+names = list(res); vals = [res[n] for n in names]
+bars = ax.bar(names, vals, color=[MERGE] + [CEIL] * 4)
+ax.axhline(cub, ls="--", color=RADIX, lw=2)
+ax.text(len(names) - 0.45, cub, f" CUB {cub:.0f}", color=RADIX, va="bottom", fontsize=9, fontweight="bold")
+ax.set_ylabel("ms (2^28, 1 GB)"); ax.set_title("Iterate down from CUB parity -- each opt's real worth")
+for b, v in zip(bars, vals): ax.text(b.get_x() + b.get_width() / 2, v, f"{v:.0f}", ha="center", va="bottom", fontsize=9)
+plt.tight_layout(); plt.show()
+""")
+
+md(r"""
+**FULL sits on the CUB line** -- so the opt list is *complete*; there's no "what else?" left. The dominant opt is the **tiled (coalesced) device merge**: it is the `log2(n/TILE)`~17 passes, so coalescing *that* is everything (>2x). **Items/thread** (register blocking -> the ILP above) is the next lever. **Coalescing the block-sort load** is small -- it's only 1 of ~18 passes, the exact distinction CUB's single `BLOCK_LOAD` flag hides. *Same algorithm throughout; only how we touch memory changes* -- and since the readable code is dialed to CUB's settings, it has CUB's profile and CUB's time.
 """)
 
 # ----------------------------------------------------------------------------
