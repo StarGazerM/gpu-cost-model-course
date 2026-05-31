@@ -31,17 +31,20 @@ md(r"""
 | # | section | min |
 |---|---|---|
 | 0 | Thesis + hardware | 3 |
-| 1 | Bandwidth identity | 4 |
-| 2 | **Latency & how the GPU hides it** (concurrency) | 6 |
-| 2b | **A thread is also a SIMD lane** (divergence trap + shuffle-sort tool) | 5 |
-| 3 | **Cost model in two lines** (thrust dispatch) | 5 |
-| 4 | Cache cliff -- measure at GB (right before the sorts) | 4 |
-| 5 | Two sorts (framing) | 2 |
-| 5a | Radix: passes-law + 4x merge | 9 |
-| 5b | Merge: hierarchy + ablation | 9 |
-| 6 | Kernel is ~10% (rug pull) | 6 |
+| 1 | Bandwidth identity | 3 |
+| 2 | **Latency & how the GPU hides it** (concurrency) | 5 |
+| 2b | **A thread is also a SIMD lane** (divergence trap + shuffle-sort tool) | 4 |
+| 3 | **Cost model in two lines** (thrust dispatch) | 4 |
+| 4 | Cache cliff -- measure at GB (right before the sorts) | 3 |
+| 5 | Two sorts (framing) | 1 |
+| 5a | **Radix** -- how it works + the passes-law (why linear wins) | 9 |
+| 5b-i | **Merge** -- the algorithm (doubling down the hierarchy) | 5 |
+| 5b-ii | **Merge** -- the optimization (register blocking + ILP) | 6 |
+| 6 | Kernel is ~10% (rug pull) | 5 |
 | 7 | Closing | 3 |
 | - | Q&A | 5 |
+
+content = 51 min, +5 Q&A = 56, leaving a ~4 min overrun buffer in the hour.
 
 (SASS-diff and histogram sections were cut for time; they live in the repo as
 supporting material.)
@@ -83,7 +86,7 @@ print("built.")
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 1. The chip's identity is bandwidth  (~4 min)
+## 1. The chip's identity is bandwidth  (~3 min)
 
 > **Demo** `demo1_bandwidth` &middot; **in:** one ~1 GB array &middot; **out:** achieved GB/s &middot; **algorithm:** trivial vectorized streaming copy `out[i]=in[i]` (GPU) and STREAM Triad `a=b+s*c` (CPU) &middot; **why:** the simplest possible kernel, so the only thing measured is the bus -- it establishes bandwidth as the chip's identity.
 
@@ -124,7 +127,7 @@ plt.show()
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 2. The hidden half: latency, and why "18k cores" is a lie  (~6 min)
+## 2. The hidden half: latency, and why "18k cores" is a lie  (~5 min)
 
 > **Demo** `demo7_latency` &middot; **in:** a 1 GB int array wired as one random permutation cycle &middot; **out:** raw latency, single-SM throughput vs warps (against the SM's issue width), and warps/SM vs register usage &middot; **algorithm:** per-thread dependent-load pointer chase on ONE SM, swept 1..32 warps, then register-heavy variants &middot; **why:** *prove* that latency hiding via oversubscription -- not "more cores" -- is the engine, and that the parallelism is *occupancy*, set by registers.
 
@@ -171,7 +174,7 @@ plt.show()
 """)
 # ----------------------------------------------------------------------------
 md(r"""
-## 2b. The other face: a "thread" is also a SIMD lane  (~5 min)
+## 2b. The other face: a "thread" is also a SIMD lane  (~4 min)
 
 In section 2 a "thread" was a *task* you oversubscribe to **hide** latency. Inside a warp it's the opposite: 32 "threads" are **one SIMD unit** -- 32 lanes running the *same instruction* in lockstep. A data-dependent branch doesn't fork 32 independent threads; the warp executes *every* path some lane takes, and a data-dependent loop runs until the **slowest** lane finishes while the rest idle.
 
@@ -210,7 +213,7 @@ print(sh("./warp_sort", cwd=f"{ROOT}/demo8_divergence"))
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 3. The cost model, in two lines of user code  (~5 min, the hook)
+## 3. The cost model, in two lines of user code  (~4 min, the hook)
 
 > **Demo** `demo6_mergesort/thrust_compare` &middot; **in:** 2^28 random int32 &middot; **out:** runtime of `thrust::sort` with a default vs a custom comparator &middot; **algorithm:** `thrust::sort`, which dispatches to radix or merge by key/comparator *type* &middot; **why:** the cost-model decision is already baked into the highest-level API -- the hook.
 
@@ -251,7 +254,7 @@ plt.show()
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 4. Before we measure the sorts: the cache cliff -- so measure at GB scale  (~4 min)
+## 4. Before we measure the sorts: the cache cliff -- so measure at GB scale  (~3 min)
 
 > **Demo** `demo2_sort/v0_naive` &middot; **in:** 2^24..2^27 random int32 keys &middot; **out:** sort throughput vs array size &middot; **algorithm:** naive bitonic sort (one global-memory kernel per compare-swap stage) &middot; **why:** the same kernel across sizes exposes the L2 cliff -- proof a sub-cache benchmark lies, so measure at >= 1 GB.
 
@@ -290,24 +293,27 @@ plt.show()
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 5. Two sorts, two truths about the chip  (framing ~2 min)
+## 5. Two sorts, two truths about the chip  (framing ~1 min)
 
 Why ship *both*? Because there's no single best sort -- the cost model picks the game. The two algorithms illuminate the two halves of "what is a GPU."
 
 ### 5a. Radix -- *massive parallelism collapses the algorithm; linear time wins*  (~9 min)
 
-> **Demo** `demo2_sort` (v0->v4) + `demo6_mergesort/cub_compare` &middot; **in:** 2^26 / 2^28 random int32 &middot; **out:** per-version runtime; CUB merge vs radix at 1 GB &middot; **algorithm:** the bitonic optimization arc ending in CUB radix, then radix vs a fully-tuned CUB merge &middot; **why:** hand-tuning a comparison sort has a ceiling; on a bandwidth machine the linear-pass algorithm (radix) wins.
+> **Demo** `demo6_mergesort/radix_passes` (how it works) + `demo2_sort` (v0->v4) + `cub_compare` &middot; **in:** tiny keys, then 2^26 / 2^28 random int32 &middot; **out:** the array sorting digit-by-digit; then per-version runtime and CUB radix vs merge at 1 GB &middot; **why:** radix makes *no comparisons* -- its cost is the number of digit-passes, and on a bandwidth machine that's why it wins.
 
-On a CPU you're taught O(n log n) comparison sort is optimal and you ignore radix for its constants. The GPU inverts the cost model: with near-perfect data-parallelism the per-element work is free, so **only passes over memory count** -- and O(n)-pass radix beats O(n log n) merge. The naive-to-radix arc (bitonic is just the bad global-memory baseline that motivates it), then radix vs a *fully optimized* CUB merge at GB scale.
-
-```cpp
-// production radix is two lines: ask for scratch, then sort
-size_t bytes = 0;
-cub::DeviceRadixSort::SortKeys(nullptr,  bytes, d_in, d_out, n);
-cudaMalloc(&d_temp, bytes);
-cub::DeviceRadixSort::SortKeys(d_temp, bytes, d_in, d_out, n);
-```
+On a CPU you're taught O(n log n) comparison sort is optimal, and you ignore radix for its constants. The GPU inverts that cost model: with near-perfect data-parallelism the per-element work is free, so **only passes over memory count**. Radix makes **no comparisons at all** -- it reads a *digit* of each key and stably buckets by it, one digit at a time. After `key_bits / digit_bits` passes the whole key is sorted. Watch it happen:
 """)
+
+md(r"""
+**Recap -- how radix sorts without ever comparing.** Each pass is a **stable counting sort on one digit**: (1) **histogram** the digit values, (2) **exclusive prefix-sum** the histogram to get each bucket's start, (3) **scatter** each key to its bucket. Repeat low digit -> high digit; LSD stability means earlier passes survive. That histogram->scan->scatter is exactly what `cub::DeviceRadixSort` runs as GPU kernels per digit -- and the only thing the cost model counts is **how many passes**.
+""")
+
+code(r"""
+# tiny LSD radix that dumps the array after each digit-pass -- watch it become sorted.
+sh("nvcc -O3 -std=c++17 -arch=sm_89 -o /tmp/rp radix_passes.cu", cwd=f"{ROOT}/demo6_mergesort")
+print(sh("/tmp/rp", cwd=f"{ROOT}/demo6_mergesort"))
+""")
+
 md(r"""
 **Guess first** 🎲 -- a *world-class* comparison sort (CUB merge) vs CUB radix, both at 1 GB: which wins, and by how much?
 
@@ -331,12 +337,20 @@ a2.bar(["CUB merge", "CUB radix"], [cm, cr], color=[MERGE, RADIX]); a2.set_ylabe
 a2.set_title(f"Even world-class merge gives up {cm/cr:.1f}x to radix")
 for i, v in enumerate([cm, cr]): a2.text(i, v, f"{v:.0f}", ha="center", va="bottom", fontweight="bold")
 plt.tight_layout(); plt.show()
+rp = 32 // 8               # radix: 32-bit keys, 8-bit digits -> 4 passes
+mp = (28 - 11) + 1         # merge @2^28, TILE=2^11: 17 device-merge passes + 1 block-sort = 18
+print(f"passes-law: radix ~{rp} passes vs merge ~{mp} passes -> predicted {mp/rp:.1f}x; "
+      f"measured {cm/cr:.1f}x. The speedup IS the pass ratio, not magic.")
 """)
 
 md(r"""
-### 5b. Merge -- the same algorithm, walked down the memory hierarchy  (~9 min)
+**That is the whole radix lesson, quantified.** Both sorts are *pass-bound* (each pass streams all of memory once -- §1's bandwidth is the ceiling). Radix's cost is `key_bits / digit_bits` passes -- **~4** for 32-bit keys, *independent of n*. Merge's cost is `log2(n/TILE)` passes -- **~18** at 2^28. The measured ~4x isn't a constant-factor tuning win; it's `18/4` -- **fewer passes over memory.** That's why "O(n) beats O(n log n)" here is not a CPU heresy but the cost model doing its job: on a bandwidth machine where per-element work is free, the algorithm with fewer memory passes wins, full stop.
+""")
 
-> **Demo** `demo6_mergesort/merge_passes` (how it works) + `merge_ablation` (the lever) &middot; **in:** random int32 &middot; **out:** the array after every pass; then Mkeys/s vs ITEMS_PER_THREAD &middot; **algorithm:** a CUB-faithful parallel merge sort &middot; **why:** make the parallel merge sort concrete, then expose the one *hardware* lever (register blocking / ILP) behind its speed.
+md(r"""
+### 5b-i. Merge -- the algorithm: doubling down the memory hierarchy  (~5 min)
+
+> **Demo** `demo6_mergesort/merge_passes` &middot; **in:** tiny random int32 &middot; **out:** the array after every pass &middot; **algorithm:** a CUB-faithful parallel merge sort &middot; **why:** make the parallel merge sort concrete -- watch the sorted runs double, each level in a bigger tier of memory.
 
 Merge is the **general** sort -- any comparator, where radix can't go. Its speed on a GPU isn't about the algorithm; it's about **where the data lives**. First, a recap of what the parallel merge sort actually does.
 """)
@@ -378,6 +392,10 @@ plt.tight_layout(); plt.show()
 """)
 
 md(r"""
+### 5b-ii. Merge -- the optimization: register blocking & ILP  (~6 min)
+
+We have a *correct* parallel merge sort. Now the one *hardware* lever that makes it fast -- and it's the same latency story as §2, moved inside a thread.
+
 **The hardware lever: register blocking** -- dialed by one number, **`ITEMS_PER_THREAD` (IPT)**: how many keys each thread holds and sorts in registers (level 1) before touching shared/global. The surface reason is "registers are the fastest, and chip-wide the *largest* (~36 MB), on-chip memory." But that can't be the whole story -- IPT=1 uses registers too. The deep reason it keeps paying at GB scale, where a 96 MB L2 should hide every latency, is **ILP**.
 
 ```cpp
@@ -489,7 +507,7 @@ print("climb survives even past the 96 MB L2. The lever is concurrency-in-a-thre
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 6. The kernel is ~10%  (~6 min)
+## 6. The kernel is ~10%  (~5 min)
 
 > **Demo** `demo3_rugpull` &middot; **in:** 2^20 keys wrapped in a per-iteration allocate/copy/sort/copy/free loop &middot; **out:** per-iteration ms for naive vs pool vs graph &middot; **algorithm:** the same v3 sort, with cudaMalloc vs cudaMallocAsync vs a captured CUDA graph &middot; **why:** the kernel is unchanged across all three -- it shows allocation/orchestration, not the kernel, dominates.
 
