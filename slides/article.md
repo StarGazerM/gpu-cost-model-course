@@ -86,17 +86,22 @@ The catch that makes or breaks everything: bandwidth only materializes if a warp
 
 ![Coalesced: 32 lanes hit contiguous addresses = one 128-byte transaction. Strided: each lane its own sector = many partial transactions, bus wasted.](figures/06b_coalescing.png)
 
-### 0.7 Where it all lives — a die shot
+### 0.7 Where it all lives — on the silicon
 
-> **[INSERT: annotated AD102 die shot.]** Point the camera at silicon so the abstractions land physically. Annotate **only**:
-> - the **grid of repeated tiles** = the **SM array** ("the cores — ~142 of them");
-> - **one SM zoomed** = 4 sub-partitions, each a **warp scheduler + 32 lanes**; the **register file** bank; the **shared-memory/L1** block;
-> - the **central band** = **L2 cache** (~96 MB);
-> - the **edge blocks** = **memory controllers / GDDR PHYs** (the bandwidth).
->
-> **Explicitly wave off** the tensor cores, RT cores, and graphics/raster hardware: *"Ignore these — they're vendor-specific accelerators for regular (matmul) or irregular (ray) work, a different programming model we are not covering. The general-purpose story is the SM array + cache + memory controllers."*
+Make the contrast physical: a CPU core is **mostly control** (front-end, branch prediction, rename, ROB, schedulers) wrapped around a few execution units; a GPU SM is **mostly execution + register file** with one small shared scheduler. The honest catch for the slide: **you cannot *photograph the absence* of a branch predictor** — so show it *two ways*, a "what's there" next to a "what isn't."
 
-The point of the image: "cores" you can count are SMs; the thing called a CUDA core is a sliver of a sub-partition; the L2 and the memory PHYs are *enormous* — because this is a memory machine.
+> **[INSERT A — a CPU core, full of control.]** An *annotated core floorplan* where the labels do the work. Best public source: Chips and Cheese's annotated **AMD Zen 4 / Zen 5** core (from AMD's ISSCC papers) — the **branch predictor gets the largest area budget of any front-end block**, and front-end + scheduler/ROB dwarf the ALUs. (AnandTech / WikiChip / Intel-AMD ISSCC slides have equivalents.) *Caption: "half of this core exists to keep ONE instruction stream fast — branch prediction, OoO, rename. None of it survives on the GPU."*
+
+> **[INSERT B — a GPU SM, with none of it.]** NVIDIA's **Ada whitepaper SM block diagram**: warp schedulers + **register file** + FP32/INT **lanes** + L1/shared (+ tensor/RT). There is **no branch predictor, no ROB, no rename** — the absence *is* the point. *Caption: "the SM spends its area on lanes and registers; the control is one shared scheduler per 32 lanes — and it's tiled ~142×."*
+
+> **[INSERT C — the whole die, real silicon.]** A **Fritzchens Fritz** infrared die photo (e.g. **GA102**, released ~public-domain — free with credit). Annotate **only**: the **grid of repeated tiles** = the **SM array** ("the cores"); the **central band** = **L2** (~96 MB); the **edge blocks** = **GDDR PHYs / memory controllers** (the bandwidth). **Wave off** tensor/RT/raster blocks: *"vendor-specific accelerators for regular (matmul) / irregular (ray) work — a different programming model, out of scope."*
+
+The takeaway from the trio: "cores" you can count are **SMs**; a "CUDA core" is a sliver of a sub-partition; the **L2 and memory PHYs are enormous** — because this is a memory machine; and the entire CPU single-thread-latency apparatus is *simply not present*.
+
+**Sources / licensing:** Fritzchens Fritz die photos are free to reuse with credit; NVIDIA whitepaper diagrams and the Chips-and-Cheese/AnandTech floorplans are copyrighted (fine as fair-use in an educational talk — cite the source on the slide).
+> - Zen 5 annotated core floorplan: https://chipsandcheese.com/p/zen-5s-2-ahead-branch-predictor-unit-how-30-year-old-idea-allows-for-new-tricks
+> - Fritzchens Fritz GA102 die shots: https://thinkcomputers.org/renowned-ir-photographer-fritzchens-fritz-shares-die-shots-of-nvidia-3000-series-ga-102-silicon/
+> - NVIDIA Ada Lovelace architecture whitepaper (SM block diagram): https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf
 
 ### 0.8 Read the spec sheet like an architect (and how to buy a GPU)
 
