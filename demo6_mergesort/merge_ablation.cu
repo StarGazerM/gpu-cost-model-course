@@ -39,8 +39,12 @@ __device__ __forceinline__ int merge_path(const int* A, int aN, const int* B,
 __device__ __forceinline__ void net_sort(int (&a)[IPT]) {  // odd-even network
   for (int i = 0; i < IPT; ++i)
     for (int j = (i & 1); j + 1 < IPT; j += 2) {
+#ifdef NETBRANCHY
+      if (a[j + 1] < a[j]) { int t = a[j]; a[j] = a[j + 1]; a[j + 1] = t; }  // branchy compare-exchange
+#else
       int lo = min(a[j], a[j + 1]), hi = max(a[j], a[j + 1]);  // branchless compare-exchange
       a[j] = lo; a[j + 1] = hi;
+#endif
     }
 }
 

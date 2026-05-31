@@ -40,6 +40,8 @@ __pycache__/
 cub_compare
 thrust_compare
 merge_ablation
+merge_opts
+merge_passes
 latency
 divergence
 warp_sort

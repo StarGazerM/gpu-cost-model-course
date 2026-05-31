@@ -34,8 +34,8 @@ md(r"""
 | 1 | Bandwidth identity | 4 |
 | 2 | **Latency & how the GPU hides it** (concurrency) | 6 |
 | 2b | **A thread is also a SIMD lane** (divergence trap + shuffle-sort tool) | 5 |
-| 3 | Cache cliff (measure at GB) | 4 |
-| 4 | **Cost model in two lines** (thrust dispatch) | 5 |
+| 3 | **Cost model in two lines** (thrust dispatch) | 5 |
+| 4 | Cache cliff -- measure at GB (right before the sorts) | 4 |
 | 5 | Two sorts (framing) | 2 |
 | 5a | Radix: passes-law + 4x merge | 9 |
 | 5b | Merge: hierarchy + ablation | 9 |
@@ -171,7 +171,7 @@ plt.show()
 """)
 # ----------------------------------------------------------------------------
 md(r"""
-## 2b. The other face: a "thread" is also a SIMD lane  (~4 min)
+## 2b. The other face: a "thread" is also a SIMD lane  (~5 min)
 
 In section 2 a "thread" was a *task* you oversubscribe to **hide** latency. Inside a warp it's the opposite: 32 "threads" are **one SIMD unit** -- 32 lanes running the *same instruction* in lockstep. A data-dependent branch doesn't fork 32 independent threads; the warp executes *every* path some lane takes, and a data-dependent loop runs until the **slowest** lane finishes while the rest idle.
 
@@ -199,25 +199,9 @@ This is the leaky abstraction CUDA's language papers over: a "thread" is **somet
 """)
 
 md(r"""
-**Lockstep isn't only a tax -- it's also a tool.** If 32 lanes always run the same instruction, then a lane can *read a neighbour lane's register directly* with a shuffle (`__shfl`) -- no shared memory, no `__syncthreads`, no data-dependent `if`. The lanes stop being a hazard and start **cooperating**: they run a fixed sorting **network** (branchless min/max compare-exchanges on a *data-oblivious* schedule), so every lane executes the identical instruction stream and the lockstep is free.
+**Lockstep isn't only a tax -- it's also a tool.** If 32 lanes always run the same instruction, a lane can *read a neighbour lane's register directly* with a shuffle (`__shfl`) -- no shared memory, no `__syncthreads`, no data-dependent `if`. The lanes stop being a hazard and start **cooperating**: they run a fixed, **data-oblivious** sorting **network** (branchless min/max compare-exchanges), so every lane runs the identical instruction stream and the lockstep is free.
 
-Below, 32 lanes sort their 32 values using *only* register-to-register shuffles. This is **literally `net_sort` from §5b** -- the same odd-even transposition network, same `N` rounds -- just turned **sideways: across the warp's 32 lanes instead of down one thread's registers.** (The per-thread `net_sort` is exactly CUB's `StableOddEvenSort`; this is that network walked across lanes.)
-
-```cpp
-__device__ int warp_oddeven_sort(int v) {           // each lane holds ONE value v
-  int lane = threadIdx.x & 31;
-  for (int i = 0; i < 32; ++i) {                     // N rounds -- net_sort's outer loop
-    int phase   = i & 1;                             // even rounds pair (0,1)(2,3)..., odd (1,2)(3,4)...
-    bool is_low = ((lane & 1) == phase);             // am I the lower element of my pair?
-    int partner = is_low ? lane + 1 : lane - 1;      // neighbour lane to compare-exchange with
-    bool active = (unsigned)partner < 32u;           // lanes 0/31 sit out some rounds
-    int pv = __shfl_sync(0xffffffffu, v, active ? partner : lane);
-    int lo = min(v, pv), hi = max(v, pv);            // branchless compare-exchange
-    v = active ? (is_low ? lo : hi) : v;             // data-oblivious selects -> no divergence
-  }
-  return v;                                          // warp's 32 values now sorted across lanes
-}
-```
+Below, 32 lanes sort their 32 values using *only* register-to-register shuffles. It is the **odd-even network we show in full in §5b** (`net_sort`, which *is* CUB's `StableOddEvenSort`) -- here walked **across the warp's 32 lanes**, there walked **down one thread's registers**. Same network, the two faces of a thread -- so we keep the listing for §5b and just run it here.
 """)
 
 code(r"""
@@ -226,50 +210,11 @@ print(sh("./warp_sort", cwd=f"{ROOT}/demo8_divergence"))
 
 # ----------------------------------------------------------------------------
 md(r"""
-## 3. ...and the cache hides it too -- so measure at GB scale  (~4 min)
-
-> **Demo** `demo2_sort/v0_naive` &middot; **in:** 2^24..2^27 random int32 keys &middot; **out:** sort throughput vs array size &middot; **algorithm:** naive bitonic sort (one global-memory kernel per compare-swap stage) &middot; **why:** the same kernel across sizes exposes the L2 cliff -- proof a sub-cache benchmark lies, so measure at >= 1 GB.
-
-Run the *same naive sort kernel* across sizes. Below 96 MB the array lives in L2 and throughput is ~4x higher than reality; cross the L2 and you fall off a cliff to true HBM-bound speed. **Any benchmark that fits in cache is lying to you** -- everything past here runs at >= 1 GB.
-
-```cpp
-// naive bitonic: one kernel launch PER stage, every compare-swap hits global memory
-__global__ void stage(int* a, int n, int j, int k) {
-  int i = blockIdx.x*blockDim.x + threadIdx.x, ixj = i ^ j;
-  if (ixj > i) {
-    bool asc = (i & k) == 0;
-    if ((a[i] > a[ixj]) == asc) { int t=a[i]; a[i]=a[ixj]; a[ixj]=t; }
-  }
-}
-```
-""")
-md(r"""
-**Guess first** 🎲 -- the *same* sort kernel on 64 MB vs 256 MB of keys: same throughput, or not? and why would it differ?
-
-<table style="width:100%"><tr><td style="width:50%;vertical-align:top"><b>64 MB (fits in 96 MB L2)</b><pre>bitonic_sort(d, 1&lt;&lt;24);</pre></td><td style="width:50%;vertical-align:top"><b>256 MB (exceeds L2)</b><pre>bitonic_sort(d, 1&lt;&lt;26);</pre></td></tr></table>
-
-*(identical kernel -- only the array size changes)*
-""")
-
-code(r"""
-sizes = [24, 25, 26, 27]
-mk = [grab(sh(f"./v0_naive {s} 5", cwd=f"{ROOT}/demo2_sort"), r"([\d.]+)\s*Mkeys/s") for s in sizes]
-fig, ax = plt.subplots(figsize=(6.2, 4)); x = range(len(sizes))
-ax.plot(x, mk, "o-", color=GPU, lw=2.5, ms=9, mfc="white", mew=2)
-ax.axvspan(-0.4, 0.5, color="#ffe7c2", alpha=0.7)
-ax.text(0, mk[0], "  fits in\n  96 MB L2", va="top", color="#a85b00", fontweight="bold")
-ax.set_xticks(list(x)); ax.set_xticklabels([f"$2^{{{s}}}$\n{2**s*4//10**6} MB" for s in sizes])
-ax.set_ylabel("throughput (Mkeys/s)"); ax.set_title("The cache cliff: a sub-L2 benchmark lies")
-plt.show()
-""")
-
-# ----------------------------------------------------------------------------
-md(r"""
-## 4. The cost model, in two lines of user code  (~5 min, the hook)
+## 3. The cost model, in two lines of user code  (~5 min, the hook)
 
 > **Demo** `demo6_mergesort/thrust_compare` &middot; **in:** 2^28 random int32 &middot; **out:** runtime of `thrust::sort` with a default vs a custom comparator &middot; **algorithm:** `thrust::sort`, which dispatches to radix or merge by key/comparator *type* &middot; **why:** the cost-model decision is already baked into the highest-level API -- the hook.
 
-The highest-level GPU sort API -- `thrust::sort` -- *already* embodies the thesis. Its dispatch (`thrust/system/cuda/detail/sort.h`, `can_use_primitive_sort`) picks at **compile time**:
+We've now seen what the chip *is* -- a bandwidth machine (§1), latency hidden by concurrency (§2), SIMD lanes (§2b). The highest-level GPU sort API -- `thrust::sort` -- *already encodes choosing for it*. Its dispatch (`thrust/system/cuda/detail/sort.h`, `can_use_primitive_sort`) picks at **compile time**:
 
 ```cpp
 // arithmetic key (int/float...) AND default less/greater  -> RADIX  (cub::DeviceRadixSort)
@@ -301,6 +246,45 @@ fig, ax = plt.subplots(figsize=(6, 4))
 ax.bar(["thrust::sort(x)\n-> radix", "thrust::sort(x, MyLess())\n-> merge"], [r, m], color=[RADIX, MERGE])
 ax.set_ylabel("ms (2^28 keys)"); ax.set_title(f"One custom comparator costs {m/r:.1f}x -- the cost model, by type")
 for i, v in enumerate([r, m]): ax.text(i, v, f"{v:.1f}", ha="center", va="bottom", fontweight="bold")
+plt.show()
+""")
+
+# ----------------------------------------------------------------------------
+md(r"""
+## 4. Before we measure the sorts: the cache cliff -- so measure at GB scale  (~4 min)
+
+> **Demo** `demo2_sort/v0_naive` &middot; **in:** 2^24..2^27 random int32 keys &middot; **out:** sort throughput vs array size &middot; **algorithm:** naive bitonic sort (one global-memory kernel per compare-swap stage) &middot; **why:** the same kernel across sizes exposes the L2 cliff -- proof a sub-cache benchmark lies, so measure at >= 1 GB.
+
+That `thrust` gap -- and *every* number in the two sorts next -- is only trustworthy at the right size. Run the *same naive sort kernel* across sizes: below 96 MB the array lives in L2 and throughput is ~4x higher than reality; cross the L2 and you fall off a cliff to true HBM-bound speed. **Any benchmark that fits in cache is lying to you** -- so everything from here on (the two sorts) runs at >= 1 GB.
+
+```cpp
+// naive bitonic: one kernel launch PER stage, every compare-swap hits global memory
+__global__ void stage(int* a, int n, int j, int k) {
+  int i = blockIdx.x*blockDim.x + threadIdx.x, ixj = i ^ j;
+  if (ixj > i) {
+    bool asc = (i & k) == 0;
+    if ((a[i] > a[ixj]) == asc) { int t=a[i]; a[i]=a[ixj]; a[ixj]=t; }
+  }
+}
+```
+""")
+md(r"""
+**Guess first** 🎲 -- the *same* sort kernel on 64 MB vs 256 MB of keys: same throughput, or not? and why would it differ?
+
+<table style="width:100%"><tr><td style="width:50%;vertical-align:top"><b>64 MB (fits in 96 MB L2)</b><pre>bitonic_sort(d, 1&lt;&lt;24);</pre></td><td style="width:50%;vertical-align:top"><b>256 MB (exceeds L2)</b><pre>bitonic_sort(d, 1&lt;&lt;26);</pre></td></tr></table>
+
+*(identical kernel -- only the array size changes)*
+""")
+
+code(r"""
+sizes = [24, 25, 26, 27]
+mk = [grab(sh(f"./v0_naive {s} 5", cwd=f"{ROOT}/demo2_sort"), r"([\d.]+)\s*Mkeys/s") for s in sizes]
+fig, ax = plt.subplots(figsize=(6.2, 4)); x = range(len(sizes))
+ax.plot(x, mk, "o-", color=GPU, lw=2.5, ms=9, mfc="white", mew=2)
+ax.axvspan(-0.4, 0.5, color="#ffe7c2", alpha=0.7)
+ax.text(0, mk[0], "  fits in\n  96 MB L2", va="top", color="#a85b00", fontweight="bold")
+ax.set_xticks(list(x)); ax.set_xticklabels([f"$2^{{{s}}}$\n{2**s*4//10**6} MB" for s in sizes])
+ax.set_ylabel("throughput (Mkeys/s)"); ax.set_title("The cache cliff: a sub-L2 benchmark lies")
 plt.show()
 """)
 
@@ -350,32 +334,66 @@ plt.tight_layout(); plt.show()
 """)
 
 md(r"""
-### 5b. Merge -- the on-chip memory lever: register blocking  (~9 min)
+### 5b. Merge -- the same algorithm, walked down the memory hierarchy  (~9 min)
 
-> **Demo** `demo6_mergesort/merge_ablation` &middot; **in:** 2^28 random int32 &middot; **out:** Mkeys/s vs ITEMS_PER_THREAD &middot; **algorithm:** a CUB-faithful merge sort, recompiled with one number changed -- how many keys each thread holds in registers &middot; **why:** show the *hardware* lever behind merge's speed (keeping work in registers) and measure whether it still pays on modern silicon.
+> **Demo** `demo6_mergesort/merge_passes` (how it works) + `merge_ablation` (the lever) &middot; **in:** random int32 &middot; **out:** the array after every pass; then Mkeys/s vs ITEMS_PER_THREAD &middot; **algorithm:** a CUB-faithful parallel merge sort &middot; **why:** make the parallel merge sort concrete, then expose the one *hardware* lever (register blocking / ILP) behind its speed.
 
-Merge is the **general** sort (any comparator, where radix can't go). Its speed on a GPU isn't about the algorithm -- it's about **where the data lives**. The lever is **register blocking**, dialed by one number, **`ITEMS_PER_THREAD` (IPT)**: how many keys each thread holds in its **registers** -- the fastest, and across the whole chip the *largest*, on-chip memory (~36 MB) -- and sorts there *before* it ever touches shared or global memory. Bigger IPT = more of the sort done in registers, fewer round-trips down the hierarchy.
+Merge is the **general** sort -- any comparator, where radix can't go. Its speed on a GPU isn't about the algorithm; it's about **where the data lives**. First, a recap of what the parallel merge sort actually does.
+""")
 
-The hardware question (the guess): does pushing work into registers still pay on modern silicon, or has the 96 MB L2 flattened it? We ablate it directly -- the *same* CUB-faithful merge sort, recompiled with IPT = 1..16, at GB scale.
+md(r"""
+**Recap -- a parallel merge sort is just DOUBLING, walked down the hierarchy.** Classic merge sort starts with sorted runs of length 1 and repeatedly merges adjacent pairs: runs of 1 -> 2 -> 4 -> ... -> n. The GPU does exactly that, but each level of doubling happens in a *different, larger* tier of memory, because the runs outgrow each tier:
+
+1. **Per thread, in REGISTERS:** each thread loads `IPT` keys and sorts them with `net_sort` -> a sorted run of length `IPT`, never leaving registers.
+2. **Per block, through SHARED memory:** the block's threads merge their runs pairwise (`IPT` -> `2·IPT` -> ... -> `TILE`), so each block emits one sorted **tile**.
+3. **Across the device, through GLOBAL memory:** a sequence of kernel passes merges sorted tiles pairwise (`TILE` -> `2·TILE` -> ... -> `n`) -- these are the `log2(n/TILE)` passes the cost model counts. Each pass streams *all* of memory once, so merge's speed ceiling is just **§1's bandwidth ÷ passes** (the §5a roofline) -- everything below is about hitting it.
+
+Each individual merge is parallel via **MergePath** (co-rank): to fill output slot *k*, one binary search finds the unique split of the two input runs that feeds it, so every thread merges an independent, equal-size chunk -- no thread waits on another. *Same algorithm at every level; only the tier the data lives in changes.* Watch the runs double on a tiny input:
+""")
+
+code(r"""
+# tiny n=64 run that dumps the array after EVERY pass -- watch runs double 1->4->16->32->64
+sh("nvcc -O3 -std=c++17 -arch=sm_89 -o /tmp/mp merge_passes.cu", cwd=f"{ROOT}/demo6_mergesort")
+print(sh("/tmp/mp", cwd=f"{ROOT}/demo6_mergesort"))
+""")
+
+code(r"""
+# the same doubling as a picture: each row is one pass; bars are sorted runs.
+stages = [("input",      1,  CPU),   ("per-thread net_sort", 4,  GPU),
+          ("block_sort", 16, MERGE), ("device merge", 32, RADIX), ("device merge", 64, INK)]
+tiers  = ["",  "registers", "shared", "global", "global"]
+fig, ax = plt.subplots(figsize=(9, 3.4)); N = 64
+for row, (name, rl, col) in enumerate(stages):
+    y = len(stages) - 1 - row
+    for x0 in range(0, N, rl):
+        ax.add_patch(plt.Rectangle((x0, y - 0.4), rl, 0.8, facecolor=col,
+                     edgecolor="white", lw=1.4, alpha=0.85))
+    ax.text(-1.5, y, f"runs of {rl:>2}", ha="right", va="center", fontsize=9, fontweight="bold")
+    ax.text(N + 1.5, y, tiers[row], ha="left", va="center", fontsize=9, color=INK, style="italic")
+ax.set_xlim(-14, N + 12); ax.set_ylim(-0.7, len(stages) - 0.3)
+ax.set_yticks([]); ax.set_xticks([0, 16, 32, 48, 64]); ax.set_xlabel("array index (n = 64)")
+ax.set_title("Parallel merge sort = doubling sorted runs, each level in a bigger tier of memory")
+for s in ax.spines.values(): s.set_visible(False)
+plt.tight_layout(); plt.show()
+""")
+
+md(r"""
+**The hardware lever: register blocking** -- dialed by one number, **`ITEMS_PER_THREAD` (IPT)**: how many keys each thread holds and sorts in registers (level 1) before touching shared/global. The surface reason is "registers are the fastest, and chip-wide the *largest* (~36 MB), on-chip memory." But that can't be the whole story -- IPT=1 uses registers too. The deep reason it keeps paying at GB scale, where a 96 MB L2 should hide every latency, is **ILP**.
 
 ```cpp
-// register blocking: each thread holds IPT keys in REGISTERS and sorts them there,
-// before any trip to shared/global. Registers are the fastest on-chip memory.
+// register blocking: each thread holds IPT keys and sorts them IN REGISTERS first.
 template <int IPT> __global__ void block_sort(int* g, ...) {
-  int keys[IPT];                                 // <-- lives in registers
-  for (int i=0;i<IPT;++i) keys[i] = g[base + tid*IPT + i];   // coalesced load
-  net_sort(keys);                                // sort this thread's IPT keys IN REGISTERS
-  /* ...then merge across threads through shared memory... */
+  int keys[IPT];                                 // <-- IPT independent registers
+  for (int i=0;i<IPT;++i) keys[i] = g[base + tid*IPT + i];   // IPT independent loads
+  net_sort(keys);                                // sort this thread's IPT keys in registers
+  /* ...then merge across threads through shared memory (level 2)... */
 }
-// IPT=1 : one key/thread, nothing sorted in registers.
-// IPT=16: 16 keys sorted per thread in registers before any shared/global trip.
 ```
 
-**What `net_sort` is** (the per-thread sort): the **same odd-even network we met in §2b** -- a *fixed*, branchless sequence of min/max compare-exchanges -- but now run *down one thread's `IPT` registers* instead of *across the warp's 32 lanes*. This is **exactly CUB's `StableOddEvenSort`** (`cub/thread/thread_sort.cuh`); CUB keeps an `if`-swap to stay stable and carry value payloads, we use branchless min/max for a keys-only sort. It is **data-oblivious** (the very same comparisons run regardless of the values), so there are no branches; all 32 lanes of a warp execute it in **lockstep with zero divergence**, each sorting its own registers. A normal comparison sort's `if`s would make lanes diverge and serialize; a network never does -- which is *why* it's the right per-thread sort on a SIMD machine. (§2b's `__shfl` version and this register version are the *same network* on the two faces of a thread.)
+`net_sort` is the **same odd-even network from §2b** -- a fixed, branchless min/max compare-exchange schedule -- run *down one thread's `IPT` registers* instead of *across the warp's 32 lanes*. It is **exactly CUB's `StableOddEvenSort`** (`cub/thread/thread_sort.cuh`; CUB keeps an `if`-swap to stay stable and carry payloads, we use branchless min/max, keys-only). This is where §2b's **divergence tax gets paid off**: a network is **data-oblivious** -- the comparisons don't depend on the values -- so there is no data-dependent branch to diverge on, and all 32 lanes run it in lockstep. And "branchless" isn't even something *you* must write: a data-oblivious `if`-swap has nothing to diverge on, so `ptxas` **predicates it to the identical SASS**. Proof -- compile the network both ways and diff the cubin:
 
 ```cpp
-// odd-even sorting network on IPT registers: branchless compare-exchanges only
-__device__ void net_sort(int (&a)[IPT]) {
+__device__ void net_sort(int (&a)[IPT]) {        // branchless compare-exchanges only
   for (int i = 0; i < IPT; ++i)
     for (int j = i & 1; j + 1 < IPT; j += 2) {
       int lo = min(a[j], a[j+1]), hi = max(a[j], a[j+1]);   // no `if` -> no divergence
@@ -383,8 +401,65 @@ __device__ void net_sort(int (&a)[IPT]) {
     }
 }
 ```
+""")
 
-*(The trick that lets threads cooperate on the merge -- `MergePath` / co-rank -- is **algorithmic** plumbing: it's how you load-balance a parallel merge to shrink the work bound. It matters for correctness, but it is not a *hardware* lever, so we don't dwell on it here.)*
+code(r"""
+# PROOF that the network's branchlessness is a compiler guarantee, not a hand-opt:
+# build net_sort as min/max vs as a naive `if`-swap (-DNETBRANCHY) and compare the SASS.
+def block_sort_sass(flag):
+    sh(f"nvcc -O3 -std=c++17 -arch=sm_89 -DIPT=8 {flag} -cubin -o /tmp/np.cubin merge_ablation.cu",
+       cwd=f"{ROOT}/demo6_mergesort")
+    sass = sh("cuobjdump -sass -fun _Z10block_sortPim /tmp/np.cubin", cwd=f"{ROOT}/demo6_mergesort")
+    return [l.split('*/')[1].split(';')[0].strip() for l in sass.splitlines() if '/*' in l and ';' in l]
+bl, br = block_sort_sass(""), block_sort_sass("-DNETBRANCHY")
+nbra = lambda xs: sum('BRA' in i for i in xs)
+print(f"  branchless min/max : {len(bl):4d} SASS instrs, {nbra(bl)} divergent BRA")
+print(f"  naive   if-swap    : {len(br):4d} SASS instrs, {nbra(br)} divergent BRA")
+print(f"\n  the `if`-swap added {len(br)-len(bl)} instructions and {nbra(br)-nbra(bl)} branches -> ptxas predicated it")
+print("  to the same code. Divergence isn't 'having an if'; it's data-DEPENDENT control")
+print("  flow -- which a data-oblivious network, by construction, has none of.")
+""")
+
+md(r"""
+**ILP = instruction-level parallelism** -- the thing you already know from superscalar / out-of-order CPUs: *independent* instructions that can be in flight at the same time. §2 hid memory latency with many **warps** (parallelism *across* threads). Register blocking hides it with ILP *inside one thread*: give a thread `IPT` independent items and the unrolled load loop becomes `IPT` independent loads the scheduler issues **back-to-back, all outstanding at once** -- one thread overlapping `IPT` memory latencies (this memory-op flavour of ILP is **MLP**, memory-level parallelism). That is why register blocking climbs even when the cache is huge: the win isn't caching, it's **keeping more memory operations in flight**. You can read it straight off the SASS:
+""")
+
+code(r"""
+# ASSEMBLY proof of ILP/MLP: count the independent global loads (LDG.E) the compiler
+# emits per thread in block_sort, for IPT=1 vs IPT=8.
+import re
+for ipt in (1, 8):
+    sh(f"nvcc -O3 -std=c++17 -arch=sm_89 -DIPT={ipt} -cubin -o /tmp/ba{ipt}.cubin merge_ablation.cu",
+       cwd=f"{ROOT}/demo6_mergesort")
+    sass = sh(f"cuobjdump -sass -fun _Z10block_sortPim /tmp/ba{ipt}.cubin", cwd=f"{ROOT}/demo6_mergesort")
+    loads = [l.split('*/')[1].split(';')[0].strip() for l in sass.splitlines() if "LDG.E" in l]
+    print(f"--- IPT={ipt}: {len(loads)} independent global load(s) per thread in block_sort ---")
+    for l in loads: print("   ", l)
+print("\nIPT=1: ONE load, its result is needed at once -> the thread STALLS on that latency.")
+print("IPT=8: EIGHT loads issued back-to-back, none consumed yet -> 8 latencies overlapped")
+print("       by a single thread. That is ILP/MLP -- latency hiding without any extra warps.")
+""")
+
+code(r"""
+# picture it: 1 load in flight (latency fully exposed) vs IPT loads in flight (overlapped).
+# each row is one in-flight load: short green = issue, long grey = memory latency.
+LAT, ISS = 10.0, 0.5
+fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 3.4))
+for ax, n, title in [(a1, 1, "IPT=1: one load in flight\nthe thread STALLS on its full latency"),
+                     (a2, 8, "IPT=8: eight loads in flight at once\none thread overlaps 8 latencies (ILP/MLP)")]:
+    finish = 0
+    for k in range(n):
+        t0 = k * ISS                                   # back-to-back issue
+        ax.add_patch(plt.Rectangle((t0, k), ISS, 0.8, facecolor=GPU, edgecolor="white"))
+        ax.add_patch(plt.Rectangle((t0 + ISS, k), LAT, 0.8, facecolor=CEIL, edgecolor="white", alpha=0.7))
+        finish = max(finish, t0 + ISS + LAT)
+    ax.axvline(finish, ls="--", color=MERGE, lw=1.6)
+    ax.text(finish + 0.2, n / 2, f"data ready\n@ {finish:.0f}t", va="center", fontsize=9, color=MERGE, fontweight="bold")
+    ax.set_xlim(0, 17); ax.set_ylim(-0.4, max(n, 1) + 0.2); ax.set_yticks([])
+    ax.set_title(title, fontsize=10); ax.set_xlabel("time")
+    for s in ax.spines.values(): s.set_visible(False)
+fig.suptitle("Same per-load latency; 8 independent loads finish in nearly the same wall-time as 1", fontsize=10)
+plt.tight_layout(); plt.show()
 """)
 
 md(r"""
@@ -408,7 +483,8 @@ ax.set_ylabel("Mkeys/s (2^28, 1 GB)")
 lo, hi = res[1], res[16]
 ax.set_title(f"Register blocking climbs {hi/lo:.2f}x at GB scale -- a real, gradual step")
 plt.show()
-print("The merge-tuning arc is NOT flat: structural/data-layout opts hold on modern HW.")
+print("NOT flat: more items/thread -> more independent loads in flight (ILP/MLP), so the")
+print("climb survives even past the 96 MB L2. The lever is concurrency-in-a-thread, not cache.")
 """)
 
 # ----------------------------------------------------------------------------
