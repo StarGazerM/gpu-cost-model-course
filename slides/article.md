@@ -22,6 +22,8 @@ A GPU rips almost all of it out. No branch predictor. No out-of-order engine. No
 
 The bet is explicit: **give up single-thread latency, buy aggregate throughput.** Everything weird about the GPU falls out of this one decision. The job of this hour is to make that bet *quantitative* — a cost model — instead of folklore.
 
+![CPU spends area on control+cache for one fast thread; the GPU spends it on a sea of ALUs and a huge register file.](figures/01_area.png)
+
 ### 0.2 SIMT: one instruction stream, many lanes — and why it saves silicon
 
 Here is the single most important mechanism, and the one the marketing actively obscures.
@@ -31,6 +33,8 @@ A GPU does **not** have thousands of independent little cores. It has thousands 
 Why design it this way? **Because the control plane is what costs area on a CPU.** Fetch, decode, branch prediction, the scheduler, register renaming — that machinery dwarfs the ALU it feeds. If you force 32 lanes to run the same instruction, you **pay for that machinery once and amortize it across 32 ALUs.** One decode drives 32 ALUs; one instruction broadcast wire feeds the array. That is the "saves wire/area" point — you delete 31 of every 32 front-ends and spend the silicon on math and registers.
 
 **The subtlety that trips people up — "wide in lanes, not wide in register."** This is *not* CPU SIMD (AVX-512). With AVX, **one** thread issues one instruction over a **512-bit register** (16 lanes of *one* thread's data); the programmer hand-vectorizes. With SIMT, you have **32 threads, each with ordinary scalar 32-bit registers**, ganged behind one instruction. The width is **across threads**, and every lane's register is normal-width. So you write **scalar, per-thread code** and the hardware runs 32 copies in lockstep. Easier to write than AVX — and the source of the leaky abstraction we'll hit in §4.
+
+![AVX: one thread, one wide 512-bit register. SIMT: 32 threads, one shared instruction, per-lane scalar registers — width is across threads.](figures/02_simt_vs_avx.png)
 
 *(Aside, only if asked: other vendors pick other widths — AMD wave32/wave64 — and have their own vector-register story. The principle is identical: amortize one front-end across a lane array. I'll keep everything NVIDIA-concrete to avoid a terminology swamp.)*
 
@@ -49,9 +53,13 @@ GPU vocabulary is genuinely bad (partly marketing). Pin it down **once**, on a s
 
 The one sentence that reorients an architect: **an SM is the core; a warp is a SIMD instruction; a "CUDA core" is a SIMD lane; a "thread" is one lane's scalar work.** "18,176 cores" really means "18,176 ALUs" = 142 SMs × 128 lanes. Hold that and the rest stops being mysterious.
 
+![The hardware hierarchy (chip / SM / sub-partition / lane) maps to the software one (grid / block / warp / thread); the misleading names are 'CUDA core' (a lane) and 'thread'.](figures/03_hierarchy.png)
+
 ### 0.4 No branch predictor → predication and divergence
 
 If 32 lanes share one instruction stream, what happens at an `if`? There is **no per-lane branch predictor** (that would defeat the shared front-end). Instead the warp uses **predication / masking**: when lanes disagree, the warp executes **both sides of the branch**, with the non-participating lanes **masked off**, then reconverges. Cost = sum of both paths. This is **divergence**, and it's why data-dependent control flow is a *performance* problem on a GPU even though it's free on a CPU. It's also why GPU library code leans on **branchless, data-oblivious** kernels (sorting networks, etc.) — we'll *measure* this in §4.
+
+![At a branch the warp runs path A with half the lanes masked, then path B with the other half masked; cost is the sum of both paths.](figures/04_divergence.png)
 
 *(One-line caveat if an expert pushes: since Volta, lanes have independent program counters for correctness/forward-progress, but execution is still warp-wide SIMD with reconvergence. The lockstep mental model is the right one for performance.)*
 
@@ -60,6 +68,8 @@ If 32 lanes share one instruction stream, what happens at an `if`? There is **no
 Having deleted the out-of-order engine and the big caches, **each individual operation is high-latency** — a dependent global-memory load is **hundreds of cycles** (we'll measure ~230 ns ≈ 580 cycles), and there's no OoO window to hide it *within* a thread.
 
 So how does the chip stay busy? **Concurrency.** Each SM keeps **many warps resident** (up to 48 on our chip) and a warp scheduler that, the moment a warp stalls on memory, **switches to another ready warp in the same cycle** — a *zero-overhead* context switch. Zero-overhead because **the register file physically holds every resident warp's registers at once**; there's nothing to save or restore. This is SMT/hyperthreading taken to an extreme (think 48-way), and it is *the* latency-hiding strategy: not "make the op fast," but "always have other work ready." Little's law sets the requirement: enough threads in flight to cover the latency × bandwidth product. §3 proves this on a *single* SM so it can't be confused with "just use more cores."
+
+![Each warp issues then stalls on a long memory latency; the scheduler switches to the next resident warp for free (their registers all live on-chip), so the SM is never idle.](figures/05_latency_hiding.png)
 
 ### 0.6 The memory system: a bandwidth machine — if you feed it right
 
@@ -70,7 +80,11 @@ The other half of the throughput bet is memory **bandwidth**. Our chip's GDDR6 m
 - **L1 / L2 cache** — L2 is a big shared band (~96 MB here).
 - **HBM/GDDR** — high bandwidth, high latency.
 
+![Memory hierarchy: registers (~36 MB, largest on-chip) over shared/L1 over L2 (~96 MB) over GDDR (48 GB @ ~960 GB/s).](figures/06_mem_hierarchy.png)
+
 The catch that makes or breaks everything: bandwidth only materializes if a warp's 32 lanes touch **contiguous** addresses, so the memory system can fuse them into one wide transaction. That's **coalescing**. Scattered/strided access turns one transaction into many and throws the bus away. So "is your access pattern coalesced?" is the GPU equivalent of "do you fit in cache?" — and we'll watch a profiler catch exactly this (§7b).
+
+![Coalesced: 32 lanes hit contiguous addresses = one 128-byte transaction. Strided: each lane its own sector = many partial transactions, bus wasted.](figures/06b_coalescing.png)
 
 ### 0.7 Where it all lives — a die shot
 
