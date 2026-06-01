@@ -283,18 +283,47 @@ __global__ void stage(int* a, int n, int j, int k) {
 }
 ```
 
-## Part 6 — The cost model in two lines of user code (~4 min, the hook)
+## Part 6 — The cost model, made concrete: why radix wins, and when it stops (~6 min)
 
-`thrust::sort(x)` vs `thrust::sort(x, MyLess())` — same data, same ascending order, a comparator whose type merely *means* `a < b`. One is several times slower, because the comparator **type** routes dispatch from radix to merge at **compile time** (`can_use_primitive_sort`). The cost model, triggered by a type, invisible to the user. Perfect hook into "two sorts."
+**The hook.** `thrust::sort(x)` vs `thrust::sort(x, MyLess())` — same data, same ascending order, a comparator whose type merely *means* `a < b` — yet one is several times slower, because the comparator **type** routes dispatch from radix to merge **at compile time**:
 
 ```cpp
 struct MyLess { __device__ bool operator()(int a, int b) const { return a < b; } };
-
-thrust::sort(d.begin(), d.end());             // -> RADIX  (arithmetic key + default less/greater)
+thrust::sort(d.begin(), d.end());             // -> RADIX  (arithmetic key + default order)
 thrust::sort(d.begin(), d.end(), MyLess());   // -> MERGE  (custom comparator TYPE blocks the radix path)
-// dispatch lives in thrust/system/cuda/detail/sort.h :: can_use_primitive_sort (a compile-time choice)
-// measured (2^28): radix ~18 ms vs merge ~55 ms -- a comparator that means "a<b" costs ~3x.
+// dispatch: thrust/system/cuda/detail/sort.h :: can_use_primitive_sort  (a compile-time choice)
 ```
+
+But *why* is that the right call? Don't assert it — **derive it from the cost model, then check the profiler.**
+
+**The cost model is bytes moved (passes over memory), not "parallelism."** Both sorts are memory-bound, so runtime ≈ total bytes moved ÷ effective bandwidth:
+- **radix** ≈ `(key_bits / digit_bits)` passes × n × key_bytes × 2 (read+write) → with 8-bit digits, **~4 passes** for a 32-bit key.
+- **merge** ≈ `log2(n/TILE)` passes × n × key_bytes × 2 → **~18 passes** at 2²⁸.
+
+Radix wins because it **touches memory ~4× less** — a purely *algorithmic* fact you get by counting, before running anything.
+
+**The counter-intuitive proof: radix is fast *despite lower occupancy*.** "Faster" tempts people to assume "more parallel / higher occupancy." The profiler says the opposite — radix's dominant (scatter) kernel runs at *lower* occupancy and *lower* bandwidth than merge, and still wins, because it does far fewer passes:
+
+```text
+ncu (2^28, uint32):              warps_active   DRAM % of peak
+  radix  DeviceRadixSortOnesweep    48 %           49 %      <- LOWER occupancy, not bandwidth-saturated
+  merge  DeviceMergeSortMerge       77 %           89 %      <- MORE occupied, near peak
+  ...yet radix 13 ms  vs  merge 50 ms
+```
+The lesson that reorients a CPU/architecture person: **don't chase occupancy — minimize bytes moved.** Occupancy is a means (to hide latency), never the goal.
+
+**When does radix *stop* winning? The cost model predicts it — and it's measured.** Radix's passes scale with key width (`key_bits/digit_bits`), so its bytes grow ~`key_bits²` (more passes × wider keys), while merge grows only ~`key_bits` (same passes, wider keys). So **radix's lead halves every time the key doubles**, and the two converge:
+
+```text
+demo6_mergesort/keywidth.cu  (CUB radix vs merge, n=2^28):
+  uint32 (32-bit)   radix 13.0 ms | merge  49.8 ms   ->  merge/radix = 3.82x   [radix ~4 passes]
+  uint64 (64-bit)   radix 48.1 ms | merge 107.1 ms   ->  merge/radix = 2.22x   [radix ~8 passes]
+```
+3.82× → 2.22× exactly as predicted (radix bytes 4×, merge bytes 2× per doubling). Extrapolate: ~128-bit keys → parity; beyond → merge wins. **The cost model tells you the crossover before you measure it.**
+
+**And the hard wall — when radix is *impossible*.** Radix sorts by reading digits, so it needs a key it can decompose into digits in a *total order*: an arithmetic key with default order. Give it a **custom comparator** (arbitrary semantics) or a **non-arithmetic key**, and there are no digits to bucket — radix simply cannot run, and you *must* use comparison merge.
+
+**So the dispatch is the cost model, frozen into the type system.** `can_use_primitive_sort` checks exactly these conditions at compile time: *arithmetic key + default order → radix; otherwise → merge.* The 3× you saw from one comparator isn't a quirk — it's the cost model choosing the only algorithm that can run, decided before the program even starts. That is the whole thesis in two lines of user code.
 
 ## Part 7 — Two sorts, two truths about the chip
 
