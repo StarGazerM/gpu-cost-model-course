@@ -190,7 +190,161 @@ A copy moves `2*N` bytes once; time = bytes / bandwidth. There is no algorithm h
 Everything later is "how close to this number can a *real* computation get?"
 """)
 
-# ---- (sections 2-9 + appendix: to be built next, same canonical beat) ----
+# ============================================================================
+# 2. LATENCY -> CONCURRENCY  (prove it on ONE SM)
+# ============================================================================
+H(2, 'Latency, and why "18,176 cores" is a lie', 5)
+card("a single-SM pointer chase", "warps 1..32 on ONE block (one SM)", "accesses/s vs warp count",
+     "pin to one SM so the speed-up CANNOT be 'more cores' -- it can only be latency hiding.")
+concept(r"""
+One thread doing dependent loads is **slow** (a global load is hundreds of cycles, nothing hides it in-thread).
+Pin work to **one SM** (one block) and add warps: only the scheduler's ability to switch among them changes.
+If throughput climbs, that climb *is* latency hidden by concurrency -- not silicon.
+""")
+fig("05_latency_hiding.png", "Stalled warp -> switch to a ready one; with enough warps the SM is never idle.")
+guess("one block (one SM), going 1 -> 32 warps on it: flat (only 4 schedulers!), or faster? by how much?",
+      "1 warp", "chase<<<1, 32>>>(...)", "32 warps", "chase<<<1, 32*32>>>(...)")
+cuda(r"""
+#include <cstdio>
+#include <vector>
+#include <numeric>
+#include <random>
+__global__ void chase(const int* __restrict__ next, int N, int steps, int* sink){
+  int idx = (blockIdx.x*blockDim.x + threadIdx.x) % N;
+  for (int i=0;i<steps;i++) idx = next[idx];          // THE dependent load (cannot be hidden in-thread)
+  sink[(blockIdx.x*blockDim.x+threadIdx.x) & 1023] = idx;
+}
+int main(){
+  int N = 1<<22; std::vector<int> perm(N); std::iota(perm.begin(),perm.end(),0);
+  std::mt19937 rng(1); for(int i=N-1;i>0;i--) std::swap(perm[i],perm[rng()%(i+1)]);
+  std::vector<int> nxt(N); for(int k=0;k<N;k++) nxt[perm[k]]=perm[(k+1)%N];
+  int *d,*sink; cudaMalloc(&d,N*4); cudaMalloc(&sink,1024*4); cudaMemcpy(d,nxt.data(),N*4,cudaMemcpyHostToDevice);
+  cudaEvent_t a,b; cudaEventCreate(&a); cudaEventCreate(&b);
+  printf("ONE SM (1 block) -- only warps added, 4 schedulers:\n  warps   Maccess/s   speedup\n");
+  double base=0;
+  for (int w=1; w<=32; w*=2){
+    int steps=20000, threads=32*w;
+    chase<<<1,threads>>>(d,N,steps,sink); cudaDeviceSynchronize();
+    cudaEventRecord(a); chase<<<1,threads>>>(d,N,steps,sink); cudaEventRecord(b); cudaEventSynchronize(b);
+    float ms=0; cudaEventElapsedTime(&ms,a,b);
+    double acc=(double)threads*steps/(ms/1e3)/1e6; if(w==1) base=acc;
+    printf("  %4d   %9.1f    %.1fx\n", w, acc, acc/base);
+  }
+}
+""")
+costmodel(r"""
+~18x on **one SM** with only warps added: the extra warps cannot be cores (there's one SM) -- they hide the
+~500-cycle latency. **"18,176 cores" is occupancy you set with registers, not 18,176 CPUs.** Concurrency, not core count.
+""")
+
+# ============================================================================
+# 3. A THREAD IS ALSO A SIMD LANE  (divergence)
+# ============================================================================
+H(3, "A thread is also a SIMD lane", 4)
+card("demo8_divergence/divergence.cu", "same total work per warp, even vs uneven across lanes",
+     "ms even vs uneven", "no per-lane branch predictor -> the warp runs at its slowest lane.")
+concept(r"""
+In §2 a "thread" was a *task* you oversubscribe. Inside a warp it's the opposite: 32 lanes are **one SIMD unit**.
+A data-dependent branch isn't 32 independent threads -- the warp executes *every* path some lane takes
+(**predication/divergence**), and a data-dependent loop runs until the **slowest** lane finishes.
+Same total work; spread it *unevenly* across lanes and it's ~2x slower.
+""")
+fig("04_divergence.png", "At a branch the warp runs path A then path B, masking idle lanes -- cost is the sum.")
+guess("both kernels do the SAME total work per warp; A spreads it evenly across lanes, B unevenly (lane L does L units). Same speed?",
+      "A -- even", "int iters = 16 * step;     // every lane equal",
+      "B -- uneven", "int iters = lane * step;   // lanes 0..31 differ")
+cuda_file("demo8_divergence/divergence.cu")
+costmodel(r"""
+Same work, ~2x slower uneven -- the warp moves at its slowest lane. This is *why* the per-thread sort in §7b is a
+branchless **network**: data-oblivious code never diverges. A "thread" is sometimes a task, sometimes a lane.
+""")
+
+# ============================================================================
+# 4. COALESCING  (feed the bus) -- the killer profiler beat
+# ============================================================================
+H(4, "Coalescing: bandwidth only if lanes touch contiguous memory", 4)
+card("a coalesced vs strided copy", "1 GB, two access patterns", "GB/s + sectors/request (live ncu)",
+     "the single biggest memory lever: contiguous lanes fuse into one 128-byte transaction.")
+concept(r"""
+A warp's 32 lanes each have their *own* address (§0.2). If those 32 addresses are **contiguous**, the memory
+system fuses them into **one** 128-byte transaction; if scattered, it issues many. Same bytes, but the strided
+version throws the bus away. We profile it **live** -- the symptom is `sectors/request`: 4 (ideal) vs up to 32.
+""")
+fig("06b_coalescing.png", "Coalesced: 32 lanes -> contiguous -> 1 transaction. Strided: each its own sector -> many.")
+guess("the SAME copy, contiguous vs strided addresses -- same speed, or how much slower? and what does the profiler show?",
+      "coalesced", "out[i] = in[i];",
+      "strided", "out[(i*16)%n] = in[(i*16)%n];")
+cuda(r"""
+#include <cstdio>
+__global__ void coalesced(const int* in,int* out,int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n) out[i]=in[i]; }
+__global__ void strided  (const int* in,int* out,int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; int j=(i*16)%n; if(i<n) out[j]=in[j]; }
+int main(){
+  int n=1<<26; size_t b=(size_t)n*4; int *in,*out; cudaMalloc(&in,b); cudaMalloc(&out,b); cudaMemset(in,1,b);
+  cudaEvent_t a,c; cudaEventCreate(&a); cudaEventCreate(&c); float ms;
+  coalesced<<<n/256,256>>>(in,out,n); cudaEventRecord(a); coalesced<<<n/256,256>>>(in,out,n); cudaEventRecord(c);
+  cudaEventSynchronize(c); cudaEventElapsedTime(&ms,a,c); printf("coalesced: %5.0f GB/s\n", 2.0*b/1e9/(ms/1e3));
+  strided<<<n/256,256>>>(in,out,n); cudaEventRecord(a); strided<<<n/256,256>>>(in,out,n); cudaEventRecord(c);
+  cudaEventSynchronize(c); cudaEventElapsedTime(&ms,a,c); printf("strided  : %5.0f GB/s\n", 2.0*b/1e9/(ms/1e3));
+}
+""")
+md(r"""
+Now the **same program under Nsight Compute, live** -- read `sectors/request` straight off the profiler:
+""")
+cuda(r"""
+#include <cstdio>
+__global__ void coalesced(const int* in,int* out,int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; if(i<n) out[i]=in[i]; }
+__global__ void strided  (const int* in,int* out,int n){ int i=blockIdx.x*blockDim.x+threadIdx.x; int j=(i*16)%n; if(i<n) out[j]=in[j]; }
+int main(){ int n=1<<22; size_t b=(size_t)n*4; int *in,*out; cudaMalloc(&in,b); cudaMalloc(&out,b);
+  coalesced<<<n/256,256>>>(in,out,n); strided<<<n/256,256>>>(in,out,n); cudaDeviceSynchronize(); }
+""", args='-p --profiler-args "--metrics l1tex__average_t_sectors_per_request_pipe_lsu_mem_global_op_ld.ratio --launch-count 2 --kernel-name regex:c|s"')
+costmodel(r"""
+4 vs 32 sectors/request = ~8x the memory transactions for the *same* bytes. Coalescing is the #1 question of any
+GPU kernel ("is your access contiguous?"), and -- preview -- it is the dominant opt in the §7b merge.
+""")
+
+# ============================================================================
+# 5. REGISTERS / ILP  (latency hiding INSIDE a thread)
+# ============================================================================
+H(5, "Registers & ILP: concurrency inside one thread", 4)
+card("a per-thread load loop, IPT=1 vs 8 (SASS)", "the same loads, unrolled 1 vs 8", "independent LDG.E in flight",
+     "register blocking gives each thread independent work -> many loads outstanding -> latency hidden without more warps.")
+concept(r"""
+§2 hid latency with many **warps** (across threads). The other axis is **ILP** -- *independent instructions in
+flight within one thread* (exactly superscalar/out-of-order intuition). Give a thread `IPT` independent items
+and the unrolled load loop becomes `IPT` independent loads the scheduler issues **back-to-back, all outstanding**.
+Read it straight off the SASS: 1 item -> 1 load (stall); 8 items -> 8 loads in flight.
+""")
+guess("a thread loading 1 vs 8 independent items: how many global loads (LDG.E) are in flight before any is used?",
+      "IPT=1", "int a = g[i];          // load, then use",
+      "IPT=8", "int a[8]; for k: a[k]=g[i*8+k];  // ?")
+code(r"""
+# compile a tiny per-thread load kernel at IPT=1 vs 8 and count independent LDG.E (the in-flight loads)
+src = r'''
+template<int IPT> __global__ void load(const int* g, int* o, int base){
+  int a[IPT];
+  #pragma unroll
+  for(int k=0;k<IPT;k++) a[k] = g[base + threadIdx.x*IPT + k];   // IPT independent loads
+  int s=0;
+  #pragma unroll
+  for(int k=0;k<IPT;k++) s ^= a[k];
+  o[threadIdx.x]=s;
+}
+template __global__ void load<1>(const int*,int*,int);
+template __global__ void load<8>(const int*,int*,int);
+'''
+open("/tmp/ld.cu","w").write(src)
+sh("nvcc -arch=sm_89 -std=c++17 -cubin -o /tmp/ld.cubin /tmp/ld.cu")
+for ipt,name in [(1,"_Z4loadILi1EEvPKiPii"),(8,"_Z4loadILi8EEvPKiPii")]:
+    sass = sh(f"cuobjdump -sass -fun {name} /tmp/ld.cubin")
+    n = sass.count("LDG.E")
+    print(f"IPT={ipt}: {n} independent LDG.E in flight per thread")
+print("\nIPT=1: one load, used immediately -> the thread STALLS.")
+print("IPT=8: eight loads issued back-to-back -> 8 latencies overlapped by ONE thread (ILP/MLP).")
+""")
+costmodel(r"""
+More items/thread = more independent loads outstanding = latency hidden *within* a thread -- the win survives even
+past a huge L2 (it's concurrency, not caching). This is the **register-blocking** lever the §7b merge dials with `IPT`.
+""")
 
 nb["cells"] = cells
 nb["metadata"] = {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
