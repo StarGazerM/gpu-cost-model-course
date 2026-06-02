@@ -93,6 +93,19 @@ print("ready: %%cuda live cells enabled.")
 """)
 
 md(r"""
+### 0.0 A 90-second recap (you know this): scalar -> SIMD
+Anchor the vocabulary the GPU is about to twist. **(1)** Classic **von Neumann**: an instruction reads/writes
+**scalar registers** (32/64-bit) -- one element per instruction, one ALU, one program counter. **(2)** Data-parallel
+work (graphics, DSP, ML) runs the *same* op over arrays, so you **widen the register**: AVX-512 is a 512-bit
+register = **16 float lanes**, and one instruction processes all 16 in a single issue -- *same control, more data
+per cycle*. **(3)** That is **SIMD** (Single Instruction, Multiple Data), the CPU's data-parallel answer.
+
+The GPU's answer (next) is a *different* point in this space -- **SIMT**. (And **ILP** -- independent instructions
+in flight -- we deliberately defer to §5, where it becomes a GPU programming lever, not a transparent CPU feature.)
+""")
+fig("00_scalar_simd.png", "Scalar: one instruction -> one 32/64-bit register -> one result. SIMD: one instruction -> one wide register -> 16 results.")
+
+md(r"""
 ### 0.1 The bet: throughput, not latency
 A CPU core spends its area making *one* instruction stream fast (out-of-order, branch prediction, big caches).
 A GPU rips that out and spends the area on **many ALUs** + **enough resident threads to switch among**.
@@ -101,10 +114,12 @@ Give up single-thread latency; buy aggregate throughput. Everything weird follow
 fig("01_area.png", "CPU spends area on control+cache for one fast thread; the GPU on a sea of ALUs + a huge register file.")
 
 md(r"""
-### 0.2 SIMT, and the words that mislead
-32 lanes share one fetch/decode/scheduler (a **warp**) and run the same instruction in lockstep, each on its
-*own* scalar registers. That is **SIMD execution with a per-lane register file** -- width is *across threads*,
-not a wide register (unlike AVX). Pin the vocabulary once, or everything later is noise:
+### 0.2 SIMT -- the GPU's *different* answer, and the words that mislead
+The GPU does **not** use §0.0's SIMD (one thread, one wide register). Instead, **32 lanes share one
+fetch/decode/scheduler** (a **warp**) and run the same instruction in lockstep, each on its *own* scalar
+registers. That is **SIMD execution with a per-lane register file** -- the width is *across threads*, not a
+wide register. (So you write plain scalar per-thread code and the hardware gangs 32.) Pin the vocabulary once,
+or everything later is noise:
 
 | you'll hear | it really is | CPU analogy |
 |---|---|---|

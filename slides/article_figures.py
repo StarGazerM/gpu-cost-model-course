@@ -205,6 +205,30 @@ def f_addressing():
     save(fig, "02b_addressing.png")
 
 
+# 0.0 -- the CA recap: scalar (von Neumann) -> SIMD (wider register, more data/instruction)
+def f_scalar_simd():
+    fig, (a, b) = plt.subplots(1, 2, figsize=(11, 3.7))
+    for ax in (a, b):
+        ax.set_xlim(0, 12); ax.set_ylim(0, 10); ax.axis("off")
+    a.set_title("Scalar (von Neumann): 1 element / instruction", fontsize=10.5, color=CPU)
+    box(a, 1, 8.3, 10, 1.1, CPU, "1 instruction   add r3, r1, r2", fs=10)
+    a.add_patch(FancyArrow(6, 8.2, 0, -1.0, width=0.05, head_width=0.4, color=INK))
+    box(a, 4.4, 5.4, 3.2, 1.4, COOL, "32/64-bit reg", fs=9)
+    a.add_patch(FancyArrow(6, 5.3, 0, -1.0, width=0.05, head_width=0.4, color=INK))
+    box(a, 4.7, 2.7, 2.6, 1.4, GPU, "ALU", fs=9)
+    a.text(6, 1.8, "one register, one ALU, one result", ha="center", color=INK, fontsize=9)
+    b.set_title("SIMD (e.g. AVX-512): 16 elements / instruction", fontsize=10.5, color=COOL)
+    box(b, 1, 8.3, 10, 1.1, CPU, "1 instruction   vaddps zmm3, zmm1, zmm2", fs=9.5)
+    b.add_patch(FancyArrow(6, 8.2, 0, -1.0, width=0.05, head_width=0.4, color=INK))
+    for i in range(8):
+        box(b, 1 + i * 1.25, 5.4, 1.1, 1.4, COOL, f"{i}", fs=8)
+    b.text(11.55, 6.1, "...x16", color=INK, fontsize=9, fontweight="bold")
+    box(b, 1, 2.7, 10, 1.3, GPU, "wide ALU -- 16 lanes, one cycle", fs=9)
+    b.text(6, 1.9, "ONE wide register; same control, more data per instruction", ha="center", color=INK, fontsize=9)
+    save(fig, "00_scalar_simd.png")
+
+
 if __name__ == "__main__":
+    f_scalar_simd()
     f_area(); f_simt(); f_addressing(); f_hierarchy(); f_divergence(); f_latency(); f_mem(); f_coalesce()
     print("done ->", OUT)
