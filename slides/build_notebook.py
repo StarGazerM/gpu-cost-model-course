@@ -14,6 +14,10 @@ def code(s): cells.append(nbf.v4.new_code_cell(s.strip("\n")))
 def cuda(src, args=""):  # a live, editable %%cuda (nvcc4jupyter) cell -- real CUDA, recompiled on run
     head = "%%cuda " + args if args else "%%cuda"
     cells.append(nbf.v4.new_code_cell(head + "\n" + src.strip("\n")))
+_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+def cuda_file(relpath, args=""):  # embed a real .cu file as a live %%cuda cell (file stays source of truth)
+    with open(os.path.join(_ROOT, relpath)) as f:
+        cuda(f.read(), args)
 
 # ----------------------------------------------------------------------------
 md(r"""
@@ -345,11 +349,8 @@ md(r"""
 **Recap -- how radix sorts without ever comparing.** Each pass is a **stable counting sort on one digit**: (1) **histogram** the digit values, (2) **exclusive prefix-sum** the histogram to get each bucket's start, (3) **scatter** each key to its bucket. Repeat low digit -> high digit; LSD stability means earlier passes survive. That histogram->scan->scatter is exactly what `cub::DeviceRadixSort` runs as GPU kernels per digit -- and the only thing the cost model counts is **how many passes**.
 """)
 
-code(r"""
-# tiny LSD radix that dumps the array after each digit-pass -- watch it become sorted.
-sh("nvcc -O3 -std=c++17 -arch=sm_89 -o /tmp/rp radix_passes.cu", cwd=f"{ROOT}/demo6_mergesort")
-print(sh("/tmp/rp", cwd=f"{ROOT}/demo6_mergesort"))
-""")
+# LIVE -- tiny LSD radix that dumps the array after each digit-pass; edit DIGIT_BITS/N and re-run.
+cuda_file("demo6_mergesort/radix_passes.cu")
 
 md(r"""
 **Guess first** 🎲 -- a *world-class* comparison sort (CUB merge) vs CUB radix, both at 1 GB: which wins, and by how much?
@@ -402,11 +403,8 @@ md(r"""
 Each individual merge is parallel via **MergePath** (co-rank): to fill output slot *k*, one binary search finds the unique split of the two input runs that feeds it, so every thread merges an independent, equal-size chunk -- no thread waits on another. *Same algorithm at every level; only the tier the data lives in changes.* Watch the runs double on a tiny input:
 """)
 
-code(r"""
-# tiny n=64 run that dumps the array after EVERY pass -- watch runs double 1->4->16->32->64
-sh("nvcc -O3 -std=c++17 -arch=sm_89 -o /tmp/mp merge_passes.cu", cwd=f"{ROOT}/demo6_mergesort")
-print(sh("/tmp/mp", cwd=f"{ROOT}/demo6_mergesort"))
-""")
+# LIVE -- tiny n=64 run that dumps the array after EVERY pass; watch runs double 1->4->16->32->64.
+cuda_file("demo6_mergesort/merge_passes.cu")
 
 code(r"""
 # the same doubling as a picture: each row is one pass; bars are sorted runs.
