@@ -158,11 +158,12 @@ SIMD couldn't do is *native*. And you launch *thousands*: when one warp stalls o
 to another ready warp** -- a **"manual pipeline"** you build by exposing parallelism, not one a compiler unrolls.
 That is how the GPU hides the miss ILP couldn't -- not more in-flight work *per thread*, but **more threads**.
 """)
-fig("02b_addressing.png", "SIMT: each lane its own address (the gather SIMD can't) -- coalesced if contiguous, scattered if not.")
+fig("05_latency_hiding.png", "The same cache miss as beat 2 -- now HIDDEN: when one warp stalls, the scheduler runs another, so the SM is never idle. The warp pipeline ILP could not build alone.")
 md(r"""
-Two debts this leaves, paid later: per-lane addresses are only *fast* when contiguous -- **coalescing** (§4) is how
-SIMT wins back SIMD's one-transaction efficiency; and ILP doesn't vanish -- you can *also* give each thread independent
-work (**register blocking**, §5), the second overlap axis. We prove the warp-switching on *one* SM in §2.
+Beat 2's pipeline stalled on the miss; beat 4's *warp* pipeline hides it -- same idea, but the overlap is across
+**threads**, not within one. (Two follow-ons we'll *earn* later, not assume here: those per-lane addresses are only
+*fast* when contiguous -- that's **coalescing**, §4; and ILP returns as a knob you dial per thread -- **register
+blocking**, §5. We prove the warp-switching itself on *one* SM in §2.)
 """)
 
 md(r"""
