@@ -228,7 +228,61 @@ def f_scalar_simd():
     save(fig, "00_scalar_simd.png")
 
 
+# 0.3a -- CPU ILP: unroll overlaps independent loads, but a cache MISS still stalls the consumer
+def f_cpu_pipeline():
+    fig, (a, b) = plt.subplots(2, 1, figsize=(10, 4.4))
+    fig.subplots_adjust(hspace=0.75)
+    for ax in (a, b):
+        ax.set_xlim(0, 22); ax.set_ylim(-0.5, 4.2); ax.set_yticks([])
+        for s in ax.spines.values(): s.set_visible(False)
+    a.set_xticks([])
+    LAT = 4.0
+    a.set_title("Scalar: loads are serial -- every latency fully exposed", fontsize=10, color=CPU)
+    t = 0
+    for k in range(3):
+        a.add_patch(Rectangle((t, 1.4), 0.5, 0.9, facecolor=GPU, edgecolor="white")); t += 0.5
+        a.add_patch(Rectangle((t, 1.4), LAT, 0.9, facecolor=CEIL, edgecolor="white", alpha=0.7)); t += LAT
+        a.add_patch(Rectangle((t, 1.4), 0.5, 0.9, facecolor=INK, edgecolor="white")); t += 0.5
+    a.text(21.5, 1.85, "use", ha="right", color=INK, fontsize=8)
+    b.set_title("ILP (unroll): independent loads OVERLAP -- but one cache miss bubbles the consumer", fontsize=10, color=GPU)
+    for k in range(4):
+        t0 = k * 0.5
+        miss = (k == 2)
+        b.add_patch(Rectangle((t0, k), 0.5, 0.8, facecolor=GPU, edgecolor="white"))
+        b.add_patch(Rectangle((t0 + 0.5, k), LAT * (3 if miss else 1), 0.8,
+                              facecolor=HOT if miss else CEIL, edgecolor="white", alpha=0.75))
+        if miss: b.text(t0 + 0.5 + LAT * 1.5, k + 0.4, "CACHE MISS", ha="center", va="center", color="white", fontsize=8, fontweight="bold")
+    miss_end = 0.5 * 2 + 0.5 + LAT * 3
+    b.axvline(miss_end, ls="--", color=COOL, lw=1.6)
+    b.text(miss_end + 0.2, 3.4, "consumer stalls until\nthe miss returns", color=COOL, fontsize=8.5, fontweight="bold")
+    b.set_xlabel("time  (green=issue load, grey=hit latency, red=miss latency)")
+    save(fig, "03a_cpu_pipeline.png")
+
+
+# 0.3b -- SIMD can't gather: one instruction = one base address, contiguous only
+def f_simd_gather():
+    fig, (a, b) = plt.subplots(1, 2, figsize=(11, 3.4))
+    for ax in (a, b):
+        ax.set_xlim(0, 12); ax.set_ylim(0, 10); ax.axis("off")
+    a.set_title("SIMD vector load: ONE base address, contiguous", fontsize=10, color=COOL)
+    box(a, 0.5, 8, 5, 1.0, COOL, "1 base addr", fs=9)
+    a.add_patch(FancyArrow(3, 7.9, 0, -1.1, width=0.05, head_width=0.35, color=INK))
+    for i in range(8):
+        box(a, 0.6 + i * 1.4, 4.6, 1.2, 1.3, COOL, ec="white", lw=0.6)
+    a.add_patch(Rectangle((0.6, 3.0), 11.2 - 0.6, 0.8, facecolor=COOL, edgecolor="white", alpha=0.5))
+    a.text(5.7, 3.4, "one contiguous block -> OK", ha="center", color=INK, fontsize=9)
+    b.set_title("...but per-element (scattered) addresses?", fontsize=10, color=HOT)
+    box(b, 0.3, 8, 8.5, 1.0, COOL, "1 instr -> 16 DIFFERENT addrs?", fs=9)
+    for i in range(8):
+        x = 0.6 + i * 1.4
+        b.add_patch(FancyArrow(x + 0.6, 7.9, (-2.5 + (i % 3) * 2.5) * 0.25, -1.4, width=0.02, head_width=0.16, color=HOT))
+        box(b, x, 4.6, 1.2, 1.3, HOT, ec="white", lw=0.6)
+    b.text(5.7, 3.2, "SIMD can't -- needs a SLOW gather instruction", ha="center", color=HOT, fontsize=9, fontweight="bold")
+    b.text(5.7, 2.2, "(exactly what SIMT does natively -- each lane its own address, §4)", ha="center", color=INK, fontsize=8.5)
+    save(fig, "03b_simd_gather.png")
+
+
 if __name__ == "__main__":
-    f_scalar_simd()
+    f_scalar_simd(); f_cpu_pipeline(); f_simd_gather()
     f_area(); f_simt(); f_addressing(); f_hierarchy(); f_divergence(); f_latency(); f_mem(); f_coalesce()
     print("done ->", OUT)

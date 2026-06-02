@@ -134,19 +134,40 @@ One sentence: **SM = the core; warp = a SIMD instruction; "CUDA core" = a lane; 
 fig("02_simt_vs_avx.png", "AVX: one thread, one wide register. SIMT: 32 threads, one shared instruction, per-lane scalar registers.")
 
 md(r"""
-### 0.3 Each op is slow -> hide it by oversubscription
-No out-of-order engine, so a dependent global load is **hundreds of cycles** and the thread just stalls.
-The GPU hides it by keeping **dozens of warps resident** and switching to a ready one the instant one stalls --
-free, because every resident warp's registers live on-chip. (We prove this on *one* SM in §2.)
-And memory bandwidth (~960 GB/s) only materializes if a warp's 32 lanes touch **contiguous** addresses
-(**coalescing**, §4). Registers (~36 MB) and shared memory (programmer-managed scratchpad) are the fast tiers;
-L2 (96 MB) and GDDR are the slow ones.
+### 0.3 The same loop, four ways: scalar -> ILP -> SIMD -> SIMT
+Take the simplest data-parallel kernel, SAXPY (`for i: y[i] = a*x[i] + y[i]`). How do you make it fast?
+The classic architecture progression -- ending exactly where the GPU lives.
+
+**1. Scalar.** One element per instruction (§0.0). Each `x[i]` load is hundreds of cycles; the next iteration waits.
 """)
-fig("05_latency_hiding.png", "A stalled warp is covered by another resident warp -- zero-overhead switch; the SM is never idle.")
+md(r"""
+**2. ILP (CPU, `-funroll-loops`).** Unroll so several *independent* loads issue back-to-back; the pipeline overlaps
+their latencies -- until one **misses cache** and the consumer stalls anyway. ILP overlaps work *within one thread*,
+but a single thread runs out of independent work to cover a long miss.
+""")
+fig("03a_cpu_pipeline.png", "Unroll overlaps independent loads; a cache miss still bubbles the consumer -- one thread can't hide it.")
+md(r"""
+**3. SIMD (CPU, AVX, `-O3 -march=native`).** One wide instruction does 16 lanes at once (§0.0) -- but it reads **one
+contiguous block from one base address**. Per-element / data-dependent addressing (`x[idx[i]]`, a *gather*) is not
+natural for SIMD; it needs a slow gather instruction. SIMD buys data *width*, not addressing *freedom*.
+""")
+fig("03b_simd_gather.png", "SIMD: one base address, contiguous. Scattered per-element addresses need a slow gather.")
+md(r"""
+**4. SIMT (GPU).** Each "thread" is the scalar loop body with its **own index and its own address** -- so the gather
+SIMD couldn't do is *native*. And you launch *thousands*: when one warp stalls on the miss, the scheduler **switches
+to another ready warp** -- a **"manual pipeline"** you build by exposing parallelism, not one a compiler unrolls.
+That is how the GPU hides the miss ILP couldn't -- not more in-flight work *per thread*, but **more threads**.
+""")
+fig("02b_addressing.png", "SIMT: each lane its own address (the gather SIMD can't) -- coalesced if contiguous, scattered if not.")
+md(r"""
+Two debts this leaves, paid later: per-lane addresses are only *fast* when contiguous -- **coalescing** (§4) is how
+SIMT wins back SIMD's one-transaction efficiency; and ILP doesn't vanish -- you can *also* give each thread independent
+work (**register blocking**, §5), the second overlap axis. We prove the warp-switching on *one* SM in §2.
+""")
 
 md(r"""
 ### 0.4 The programming model, in one kernel
-Before the detail code, map every token to the hardware. A kernel is **scalar per-thread code**; the launch
+**That SIMT thread (§0.3, #4) in real CUDA.** Map every token to the hardware. A kernel is **scalar per-thread code**; the launch
 `<<<grid, block>>>` stamps out `grid x block` threads; each finds its element by index; memory-space keywords
 say **where a variable lives**. Run it:
 """)
