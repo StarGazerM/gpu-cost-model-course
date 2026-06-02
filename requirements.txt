@@ -1,0 +1,25 @@
+# Python environment for the GPGPU course notebook (course.ipynb) and the live-CUDA slides.
+# Verified on: system Python 3.10.12, RTX 6000 Ada, HPC SDK 25.5 (nvcc + ncu on PATH).
+#
+#   python3 -m venv ~/.venvs/gpucourse && source ~/.venvs/gpucourse/bin/activate
+#   pip install -r requirements.txt
+#   python -m ipykernel install --user --name gpucourse --display-name "GPU course"
+#
+# Toolkit (nvcc/ncu/CUDA_PATH) is NOT a pip dep -- it's the HPC SDK on PATH.
+
+# --- core: notebook build + figures ---
+nbformat==5.10.4
+nbconvert==7.17.1
+ipykernel==6.29.5
+matplotlib==3.10.0
+
+# --- live CUDA cells (the %%cuda magic + inline Nsight Compute) ---
+nvcc4jupyter==1.2.1
+
+# --- optional: Python-side GPU harness (cp.sort == thrust radix; array timing) ---
+# NOTE: CuPy needs CUDA_PATH=<hpc_sdk>/cuda set, or NVRTC can't find headers.
+# cupy-cuda12x==13.3.0
+# numba==0.60.0
+
+# --- optional: present the notebook AS live slides (keeps the kernel live) ---
+# jupyterlab-rise
