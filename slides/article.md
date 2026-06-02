@@ -101,8 +101,8 @@ So how does the chip stay busy? **Concurrency.** Each SM keeps **many warps resi
 The other half of the throughput bet is memory **bandwidth**. Our chip's GDDR6 moves ~**960 GB/s**; a CPU's DRAM is ~100 GB/s. The hierarchy, fastest→slowest:
 
 - **Registers** — per-lane, and in aggregate **~36 MB across the chip** (256 KB/SM × 142). That's *orders of magnitude* more register storage than any CPU — because it must hold every resident warp's state (§0.2b). (Historically the register file out-sized the L2; Ada is the exception — NVIDIA grew its L2 to a huge 96 MB, so here L2 > regfile. Both are enormous on-chip SRAM, spent on the GPU's two latency strategies: registers for multithreading, L2 for reuse/coalescing.)
-- **Shared memory** — a per-SM, **programmer-managed scratchpad** (not a cache). ~100 KB/SM, organized in 32 **banks**; if lanes of a warp hit the same bank, accesses **serialize** (a *bank conflict* — the "conflicts" to watch).
-- **L1 / L2 cache** — L2 is a big shared band (~96 MB here).
+- **Shared memory + L1 — one 128 KB SRAM per SM, split configurably.** Shared memory is the **programmer-managed scratchpad** (not a cache), organized in 32 **banks** — if lanes of a warp hit the same bank, accesses **serialize** (a *bank conflict*, the "conflicts" to watch). On Ada it shares the *same* 128 KB block with the **L1 data cache**: ask for more shared (up to 100 KB) and L1 shrinks. So "do I tile through shared, or lean on L1?" is one budget, not two.
+- **L2 cache** — a big shared band (~96 MB here — unusually large on Ada).
 - **HBM/GDDR** — high bandwidth, high latency.
 
 ![Memory hierarchy: registers (~36 MB, largest on-chip) over shared/L1 over L2 (~96 MB) over GDDR (48 GB @ ~960 GB/s).](figures/06_mem_hierarchy.png)
@@ -147,8 +147,10 @@ How to read it: **300 W** power cap (boost clocks are *thermal/power*-limited �
 ```text
 NVIDIA RTX 6000 Ada Generation   sm_89 (Ada Lovelace)
 SMs: 142   maxThreads/SM: 1536  -> 48 warps/SM        # the cores, and the concurrency budget
-regs/SM: 65536 (256 KB)   sharedMem/SM: 100 KB         # occupancy = regfile / (regs/thread x 32)
-L2: 96 MB    sharedMem/block: 48 KB (opt-in ~100 KB)   # the cache-cliff size (Part 5)
+regs/SM: 65536 (256 KB)                                # occupancy = regfile / (regs/thread x 32)
+L1$ + shared = 128 KB UNIFIED/SM                       # SAME SRAM, split configurably:
+   shared carveout up to 100 KB (rest is L1 data $);     shared/block 48 KB default
+L2: 96 MB                                              # the cache-cliff size (Part 5)
 mem: 384-bit x 20 Gbps GDDR6  ->  960 GB/s             # THE headline number
 core boost: 2505 MHz     "CUDA cores": 142 x 128 = 18176
 ```
@@ -156,7 +158,7 @@ core boost: 2505 MHz     "CUDA cores": 142 x 128 = 18176
 Read each line against a concept we built:
 - **142 SMs × 128 lanes = 18,176 "cores"** — i.e. 18,176 *ALUs* (0.3), not 18,176 processors.
 - **48 warps/SM, 256 KB regfile/SM** — your **occupancy** ceiling; a register-hungry kernel fits fewer warps → hides less latency (0.5, §3). This is the knob, not a constant.
-- **100 KB shared/SM** — the managed scratchpad and its banks (0.6); also caps tile sizes in §7b.
+- **128 KB unified L1/shared per SM** — the subtle one: on Ada the **L1 data cache and the shared-memory scratchpad are the *same* physical SRAM**, split by you (shared up to 100 KB, the rest serving as L1). So asking for more shared memory *literally shrinks your L1* — a tile-size-vs-cache trade you control. (0.6; caps tile sizes in §7b.)
 - **96 MB L2** — exactly the **cache cliff** boundary: a benchmark under 96 MB lies (§5).
 - **384-bit × 20 Gbps = 960 GB/s** — the **headline**. For memory-bound work this single number *is* your speed ceiling (roofline floor = bytes ÷ 960 GB/s).
 - The **whitepaper** (AD102) adds peak FP32/FP64/tensor TFLOPS and per-SM unit counts — useful for compute-bound work, but the *least* predictive lines for the data workloads this course targets.
