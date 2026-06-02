@@ -11,6 +11,9 @@ nb = nbf.v4.new_notebook()
 cells = []
 def md(s): cells.append(nbf.v4.new_markdown_cell(s.strip("\n")))
 def code(s): cells.append(nbf.v4.new_code_cell(s.strip("\n")))
+def cuda(src, args=""):  # a live, editable %%cuda (nvcc4jupyter) cell -- real CUDA, recompiled on run
+    head = "%%cuda " + args if args else "%%cuda"
+    cells.append(nbf.v4.new_code_cell(head + "\n" + src.strip("\n")))
 
 # ----------------------------------------------------------------------------
 md(r"""
@@ -74,6 +77,12 @@ def sh(cmd, cwd=None, timeout=900):
 
 def grab(text, pat):
     m = re.search(pat, text); return float(m.group(1)) if m else float("nan")
+
+# live-CUDA cells: %%cuda compiles+runs real nvcc programs in-cell (edit -> re-run).
+# set arch + the demo include path once, so %%cuda cells stay clean.
+get_ipython().run_line_magic("load_ext", "nvcc4jupyter")
+from nvcc4jupyter import set_defaults
+set_defaults(compiler_args=f"-arch=sm_89 -O3 -std=c++17 -I{ROOT}/demo2_sort")
 
 sh("make -s -C demo1_bandwidth; make -s -C demo2_sort; make -s -C demo3_rugpull")
 sh("cd demo6_mergesort && nvcc -O3 -std=c++17 -arch=sm_89 -o cub_compare cub_compare.cu && "
@@ -207,8 +216,36 @@ md(r"""
 Below, 32 lanes sort their 32 values using *only* register-to-register shuffles. It is the **odd-even network we show in full in §5b** (`net_sort`, which *is* CUB's `StableOddEvenSort`) -- here walked **across the warp's 32 lanes**, there walked **down one thread's registers**. Same network, the two faces of a thread -- so we keep the listing for §5b and just run it here.
 """)
 
-code(r"""
-print(sh("./warp_sort", cwd=f"{ROOT}/demo8_divergence"))
+cuda(r"""
+#include <cstdio>
+#include <vector>
+#include <random>
+#include <algorithm>
+// LIVE -- edit me: 32 lanes sort 32 values via __shfl only (no shared mem, no divergence).
+__device__ int warp_oddeven_sort(int v) {            // each lane holds ONE value
+  int lane = threadIdx.x & 31;
+  for (int i = 0; i < 32; ++i) {                      // N rounds = net_sort's outer loop, ACROSS lanes
+    int phase   = i & 1;
+    bool is_low = ((lane & 1) == phase);
+    int partner = is_low ? lane + 1 : lane - 1;
+    bool active = (unsigned)partner < 32u;
+    int pv = __shfl_sync(0xffffffffu, v, active ? partner : lane);
+    int lo = min(v, pv), hi = max(v, pv);             // branchless compare-exchange
+    v = active ? (is_low ? lo : hi) : v;              // data-oblivious selects -> no divergence
+  }
+  return v;
+}
+__global__ void warp_sort(int* g){ int t = blockIdx.x*blockDim.x + threadIdx.x; g[t] = warp_oddeven_sort(g[t]); }
+int main(){
+  const int n = 1<<20; std::vector<int> h(n); std::mt19937 rng(1); for (auto&x:h) x = rng();
+  int* d; cudaMalloc(&d, n*sizeof(int)); cudaMemcpy(d, h.data(), n*sizeof(int), cudaMemcpyHostToDevice);
+  warp_sort<<<n/256,256>>>(d); cudaDeviceSynchronize();
+  std::vector<int> out(n); cudaMemcpy(out.data(), d, n*sizeof(int), cudaMemcpyDeviceToHost);
+  bool ok=true;
+  for (int w=0; w<n; w+=32){ std::vector<int> r(h.begin()+w, h.begin()+w+32); std::sort(r.begin(), r.end());
+    for (int i=0;i<32;i++) if (out[w+i]!=r[i]) ok=false; }
+  printf("32 lanes sort 32 values via __shfl only: [%s]\n", ok?"PASS":"FAIL");
+}
 """)
 
 # ----------------------------------------------------------------------------
