@@ -282,7 +282,126 @@ def f_simd_gather():
     save(fig, "03b_simd_gather.png")
 
 
+# 0.x -- the blank speeds-&-feeds pyramid: the cost-model scorecard we fill in LIVE.
+# Every "?" is a number a later demo measures; nothing here is asserted (except registers).
+def f_speeds_feeds():
+    fig, ax = plt.subplots(figsize=(11, 5.0)); ax.set_xlim(0, 15); ax.set_ylim(0, 10.2); ax.axis("off")
+    ax.set_title("The cost model is ONE table -- we measure every '?' live  (RTX 6000 Ada)", fontsize=11.5)
+    # name, capacity, bandwidth, latency, where-filled, color
+    rows = [("Registers",      "256 KB / SM",  "~free",  "~1 cyc",  "given (not benchmarked)", "#b07b16"),
+            ("Shared / L1",    "128 KB / SM",  "?",      "?",       "filled by the size sweep", GPU),
+            ("L2 cache",       "~100 MB",      "?",      "?",       "filled by the size sweep", COOL),
+            ("DRAM (GDDR6)",   "48 GB",        "?",      "?",       "BW -> §1   latency -> §2", CPU)]
+    top = 8.4
+    for i, (name, cap, bw, lat, where, c) in enumerate(rows):
+        y = top - i * 2.0
+        inset = 0.6 + (3 - i) * 0.9               # lower rows wider -> pyramid
+        x, w = inset, 15 - 2 * inset
+        box(ax, x, y, w, 1.45, c)
+        ax.text(x + 0.35, y + 0.95, name, ha="left", va="center", color="white", fontsize=11, fontweight="bold")
+        ax.text(x + 0.35, y + 0.42, cap, ha="left", va="center", color="white", fontsize=8.5)
+        # two scorecard pills on the right: bandwidth + latency
+        for j, (lab, val) in enumerate([("bandwidth", bw), ("latency", lat)]):
+            px = x + w - 5.6 + j * 2.7
+            unknown = (val == "?")
+            box(ax, px, y + 0.22, 2.4, 1.0, "white", ec=c, lw=1.6)
+            ax.text(px + 1.2, y + 1.0, lab, ha="center", va="center", color=INK, fontsize=7.5)
+            ax.text(px + 1.2, y + 0.55, val, ha="center", va="center",
+                    color=(HOT if unknown else INK), fontsize=(15 if unknown else 10),
+                    fontweight="bold")
+        ax.text(x + w + 0.15 if False else 7.5, y - 0.18, where, ha="center", va="top",
+                fontsize=8, style="italic", color=INK)
+    ax.annotate("", xy=(0.3, top - 5.6), xytext=(0.3, top + 1.5),
+                arrowprops=dict(arrowstyle="->", color=INK, lw=1.4))
+    ax.text(0.05, top - 2, "faster,\nsmaller", rotation=90, va="center", ha="center", fontsize=8, color=INK)
+    ax.text(7.5, 0.35, "CPU DRAM bandwidth (§1) and latency (§2) are measured head-to-head alongside the GPU.",
+            ha="center", fontsize=8.5, color=HOT)
+    save(fig, "00_speeds_feeds_blank.png")
+
+
+# 3.x -- the SAME 8 numbers from the trace cells, sorted two ways: branchy merge vs branchless cub network
+def f_sort_network():
+    data = [5, 2, 8, 1, 9, 3, 7, 4]; N = len(data)
+    # compute the exact same runs the %%cuda trace prints
+    def oddeven(a):
+        a = list(a); states = [list(a)]; comps = []
+        for i in range(N):
+            pairs = [(j, j + 1) for j in range(i & 1, N - 1, 2)]
+            for x, y in pairs:
+                if a[y] < a[x]: a[x], a[y] = a[y], a[x]
+            states.append(list(a)); comps.append(pairs)
+        return states, comps
+    def mergesort(a):
+        a = list(a); states = [list(a)]; w = 1
+        while w < N:
+            tmp = list(a)
+            for lo in range(0, N, 2 * w):
+                mid = min(lo + w, N); hi = min(lo + 2 * w, N); i = lo; j = mid; k = lo
+                while i < mid and j < hi:
+                    if a[i] <= a[j]: tmp[k] = a[i]; i += 1
+                    else: tmp[k] = a[j]; j += 1
+                    k += 1
+                while i < mid: tmp[k] = a[i]; i += 1; k += 1
+                while j < hi: tmp[k] = a[j]; j += 1; k += 1
+            a = tmp; states.append(list(a)); w *= 2
+        return states
+    net_states, net_comps = oddeven(data)
+    mrg_states = mergesort(data)
+    bw, sp = 0.62, 1.5
+
+    def draw_col(ax, x, vals, prev=None, allgreen=False):
+        for r, v in enumerate(vals):
+            yy = (N - 1 - r)
+            changed = (prev is not None and prev[r] != v)
+            fc = GPU if allgreen else (COOL if changed else "#e7eaec")
+            tc = "white" if (allgreen or changed) else INK
+            ax.add_patch(Rectangle((x, yy - 0.4), bw, 0.8, facecolor=fc, edgecolor="white", lw=1))
+            ax.text(x + bw / 2, yy, str(v), ha="center", va="center", color=tc, fontsize=9, fontweight="bold")
+
+    fig, (axA, axB) = plt.subplots(1, 2, figsize=(13, 5.2))
+    fig.suptitle("Sort the same 8 numbers  [5 2 8 1 9 3 7 4]  two ways", fontsize=12, fontweight="bold")
+
+    # ---------- Panel A: branchy merge ----------
+    axA.set_title("Branchy merge -- which side advances depends on the data", fontsize=10, color=HOT)
+    mlab = ["start\n(runs of 1)", "runs of 2", "runs of 4", "sorted"]
+    for s, st in enumerate(mrg_states):
+        x = s * sp
+        draw_col(axA, x, st, prev=(mrg_states[s - 1] if s > 0 else None), allgreen=(s == len(mrg_states) - 1))
+        axA.text(x + bw / 2, N + 0.15, mlab[s], ha="center", va="bottom", fontsize=8, color=INK)
+        if s >= 1:                                            # bracket the sorted runs at this level
+            for run0 in range(0, N, 2 ** s):
+                ytop = (N - 1 - run0) + 0.46; ybot = (N - 1 - (run0 + 2 ** s - 1)) - 0.46
+                axA.plot([x - 0.07, x - 0.07], [ybot, ytop], color=COOL, lw=1.6)
+    for s in range(len(mrg_states) - 1):
+        axA.annotate("", xy=((s + 1) * sp - 0.10, N / 2 - 0.5), xytext=(s * sp + bw + 0.10, N / 2 - 0.5),
+                     arrowprops=dict(arrowstyle="->", color=HOT, lw=1.2))
+    axA.set_xlim(-0.5, (len(mrg_states) - 1) * sp + bw + 0.3); axA.set_ylim(-1.3, N + 1.0); axA.axis("off")
+    axA.text(((len(mrg_states) - 1) * sp + bw) / 2, -1.0,
+             "each output = min of two run fronts -> data-dependent branch -> diverges",
+             ha="center", fontsize=7.5, color=INK)
+
+    # ---------- Panel B: branchless cub network (same numbers) ----------
+    axB.set_title("Branchless network (cub::StableOddEvenSort) -- comparators FIXED", fontsize=10, color=GPU)
+    show = 5                                                  # start + phases 0..3 (sorted by phase 3)
+    for s in range(show):
+        x = s * sp
+        draw_col(axB, x, net_states[s], prev=(net_states[s - 1] if s > 0 else None), allgreen=(s >= 3))
+        lab = "start" if s == 0 else "phase %d\n(%s)" % (s - 1, "even" if (s - 1) % 2 == 0 else "odd")
+        axB.text(x + bw / 2, N + 0.15, lab, ha="center", va="bottom", fontsize=8, color=INK)
+    for s in range(show - 1):                                 # phase s acts between col s and s+1
+        xg = s * sp + bw + (sp - bw) / 2
+        for (j, jp) in net_comps[s]:
+            y1, y2 = (N - 1 - j), (N - 1 - jp)
+            axB.plot([xg, xg], [min(y1, y2), max(y1, y2)], color=GPU, lw=2.0, zorder=2)
+            axB.plot([xg, xg], [y1, y2], "o", color=GPU, ms=3.5, zorder=3)
+    axB.set_xlim(-0.5, (show - 1) * sp + bw + 0.3); axB.set_ylim(-1.3, N + 1.0); axB.axis("off")
+    axB.text(((show - 1) * sp + bw) / 2, -1.0,
+             "positions FIXED every phase (28 = N(N-1)/2); sorted by phase 3, but 4-7 still run -> no 'done?' branch",
+             ha="center", fontsize=7.5, color=INK)
+    save(fig, "07_sort_network.png")
+
+
 if __name__ == "__main__":
-    f_scalar_simd(); f_cpu_pipeline(); f_simd_gather()
+    f_scalar_simd(); f_cpu_pipeline(); f_simd_gather(); f_speeds_feeds(); f_sort_network()
     f_area(); f_simt(); f_addressing(); f_hierarchy(); f_divergence(); f_latency(); f_mem(); f_coalesce()
     print("done ->", OUT)
