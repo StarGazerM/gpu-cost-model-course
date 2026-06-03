@@ -120,6 +120,25 @@ Give up single-thread latency; buy aggregate throughput. Everything weird follow
 fig("01_area.png", "CPU spends area on control+cache for one fast thread; the GPU on a sea of ALUs + a huge register file.")
 
 md(r"""
+**The same bet, in real silicon.** Forget the schematic for a second -- look at two actual dies. The **CPU** is a
+mosaic of *named, distinct* blocks (P-cores, E-cores, L2/L3 caches, memory controller, "compute fabric"): most of the
+area exists to keep a few threads fast. The **GPU** is the opposite -- a *uniform field of identical repeated tiles*
+with the memory interface around the rim; there is almost nothing to label because it is the **same compute unit
+stamped out hundreds of times**. Heterogeneous control vs homogeneous throughput -- that *is* the bet.
+""")
+md('<table style="width:100%"><tr>'
+   '<td style="width:50%;vertical-align:top"><b>CPU die -- full of named control</b><br>'
+   '<img src="slides/figures/die_cpu_i9_13900k.jpg" style="width:100%"><br>'
+   '<small>Intel i9-13900K (Raptor Lake): every block is *different* and labelled -- cores, L3, memory controller, '
+   'fabric. Die photo: Fritzchens Fritz; labels: JmsDoug. CC0 (Wikimedia Commons).</small></td>'
+   '<td style="width:50%;vertical-align:top"><b>GPU die -- a uniform field of tiles</b><br>'
+   '<img src="slides/figures/die_gpu_nvidia_g71.jpg" style="width:100%"><br>'
+   '<small>An NVIDIA die (G71, older -- shown for *structure*): a monotonous grid of the same tile + memory pads at '
+   'the edges. CC0 (M. Boer, Wikimedia). Modern Ada is the same idea at 142 SMs + 96 MB L2 -- see the SM diagram in '
+   'the <a href="https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf">Ada whitepaper</a>.</small></td>'
+   '</tr></table>')
+
+md(r"""
 ### 0.2 SIMT -- the GPU's *different* answer, and the words that mislead
 The GPU does **not** use §0.0's SIMD (one thread, one wide register). Instead, **32 lanes share one
 fetch/decode/scheduler** (a **warp**) and run the same instruction in lockstep, each on its *own* scalar
