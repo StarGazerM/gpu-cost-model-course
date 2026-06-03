@@ -401,7 +401,39 @@ def f_sort_network():
     save(fig, "07_sort_network.png")
 
 
+# 0.0 -- the von Neumann baseline the GPU twists: one PC, one instruction stream, scalar registers
+def f_von_neumann():
+    fig, ax = plt.subplots(figsize=(10, 4.2)); ax.set_xlim(0, 15); ax.set_ylim(0, 9); ax.axis("off")
+    ax.set_title("Von Neumann: ONE instruction stream, ONE program counter, scalar registers -- the baseline the GPU twists",
+                 fontsize=10.5)
+    # --- Memory (left): instructions AND data in one address space ---
+    box(ax, 0.5, 1.8, 3.2, 5.4, CPU)
+    ax.text(2.1, 6.55, "MEMORY", color="white", fontsize=11, fontweight="bold", ha="center")
+    ax.text(2.1, 5.95, "one address space", color="white", fontsize=7.5, ha="center", style="italic")
+    for i, (lab, c) in enumerate([("instruction", "#6f7a85"), ("instruction", "#6f7a85"),
+                                  ("data", "#9aa3ab"), ("data", "#9aa3ab")]):
+        box(ax, 1.0, 5.2 - i * 0.78, 2.2, 0.6, c, lab, fs=7.5)
+    # --- CPU (right): control unit (PC) + ALU + scalar registers ---
+    box(ax, 8.3, 1.0, 6.2, 7.0, "#3a3f44")
+    ax.text(11.4, 7.45, "CPU  (one core)", color="white", fontsize=11, fontweight="bold", ha="center")
+    box(ax, 8.8, 5.5, 5.2, 1.4, COOL)
+    ax.text(11.4, 6.45, "Control Unit", color="white", fontsize=9.5, fontweight="bold", ha="center")
+    ax.text(11.4, 5.9, "Program Counter -> fetch -> decode", color="white", fontsize=8, ha="center")
+    box(ax, 8.8, 3.4, 2.4, 1.5, GPU, "ALU", fs=11)
+    box(ax, 11.5, 3.4, 2.5, 1.5, "#b07b16")
+    ax.text(12.75, 4.4, "Registers", color="white", fontsize=9.5, fontweight="bold", ha="center")
+    ax.text(12.75, 3.9, "scalar, 32/64-bit", color="white", fontsize=7.5, ha="center")
+    ax.text(11.4, 2.6, "fetch -> decode -> execute, ONE instruction at a time", ha="center", fontsize=8, color="white")
+    ax.text(11.4, 1.95, "one PC  ->  one instruction stream  ->  one result/op", ha="center", fontsize=8.5,
+            color="#ffd36b", fontweight="bold")
+    # --- the single shared bus ---
+    ax.annotate("", xy=(8.2, 4.5), xytext=(3.8, 4.5), arrowprops=dict(arrowstyle="<->", color=INK, lw=2.2))
+    ax.text(6.0, 5.0, "address / data bus", ha="center", fontsize=9, color=INK, fontweight="bold")
+    ax.text(6.0, 3.7, "instructions AND data\nshare this one path", ha="center", fontsize=7.5, color=HOT, style="italic")
+    save(fig, "00_von_neumann.png")
+
+
 if __name__ == "__main__":
-    f_scalar_simd(); f_cpu_pipeline(); f_simd_gather(); f_speeds_feeds(); f_sort_network()
+    f_scalar_simd(); f_cpu_pipeline(); f_simd_gather(); f_speeds_feeds(); f_sort_network(); f_von_neumann()
     f_area(); f_simt(); f_addressing(); f_hierarchy(); f_divergence(); f_latency(); f_mem(); f_coalesce()
     print("done ->", OUT)

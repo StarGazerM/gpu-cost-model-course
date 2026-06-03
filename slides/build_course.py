@@ -109,6 +109,7 @@ per cycle*. **(3)** That is **SIMD** (Single Instruction, Multiple Data), the CP
 The GPU's answer (next) is a *different* point in this space -- **SIMT**. (And **ILP** -- independent instructions
 in flight -- we deliberately defer to §5, where it becomes a GPU programming lever, not a transparent CPU feature.)
 """)
+fig("00_von_neumann.png", "The baseline machine: one program counter fetches one instruction at a time from a single memory, into scalar 32/64-bit registers. Everything the GPU does is a twist on this.")
 fig("00_scalar_simd.png", "Scalar: one instruction -> one 32/64-bit register -> one result. SIMD: one instruction -> one wide register -> 16 results.")
 
 md(r"""
