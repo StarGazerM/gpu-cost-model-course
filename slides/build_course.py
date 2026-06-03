@@ -121,13 +121,13 @@ registers. That is **SIMD execution with a per-lane register file** -- the width
 wide register. (So you write plain scalar per-thread code and the hardware gangs 32.) Pin the vocabulary once,
 or everything later is noise:
 
-| you'll hear | it really is | CPU analogy |
-|---|---|---|
-| "CUDA core" (18,176!) | an **ALU / lane** | one SIMD lane |
-| thread | one lane's scalar work | a lane of a vector op |
-| warp | **32 lanes** sharing an instruction | one SIMD instruction |
-| **SM** | the real processor (~142) | **the core** |
-| register | per-lane; the file is partitioned by occupancy | register file |
+| you'll hear | it really is | CPU analogy | in CUDA code |
+|---|---|---|---|
+| "CUDA core" (18,176!) | an **ALU / lane** | one SIMD lane | you write it as a **`thread`** (a lane *is* a thread) |
+| thread | one lane's scalar work | a lane of a vector op | `threadIdx`, the kernel body |
+| warp | **32 lanes** sharing an instruction | one SIMD instruction | `warpSize`, `__shfl_sync`, `__ballot_sync` |
+| **SM** | the real processor (~142) | **the core** | a **`block`** runs on one (`blockIdx`); `prop.multiProcessorCount` |
+| register | per-lane; partitioned by occupancy | register file | a plain local var (`int x;`) vs `__shared__` |
 
 One sentence: **SM = the core; warp = a SIMD instruction; "CUDA core" = a lane; thread = one lane's work.**
 """)
