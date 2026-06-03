@@ -80,5 +80,22 @@ that card — re-run on yours and the *shape* of every result should hold even a
 - **Triton — memory coalescing & automatic vectorization** (SIMD packing the compiler owns): <https://deepwiki.com/triton-lang/triton/4.6-memory-coalescing-and-access-optimization>
 - **Warp Specialization in Triton** (PyTorch): <https://pytorch.org/blog/warp-specialization-in-triton-design-and-roadmap/>
 
-*Die photos (Fritzchens Fritz) are reusable with credit; NVIDIA/Chips-and-Cheese diagrams are copyrighted — cited here
-as fair-use educational references.*
+### Further reading — NVIDIA's own cost-model material (the official version of this thesis)
+Most of NVIDIA's teaching is CUDA-API-first; these are the exceptions that teach the *machine / cost model* rather than
+the syntax — the closest official analogues to this course:
+- **Stephen Jones (NVIDIA) — "How GPU Computing Works", GTC 2021** — latency vs throughput, the memory wall,
+  oversubscription. The single best talk-form statement of this course's thesis. ([summary](https://medium.com/@zhuangh/fwd-stephen-jones-talk-on-how-gpu-computing-where-s-my-data-at-gtc2021-712ebc302684); search "How GPU Computing Works" on [NVIDIA On-Demand](https://www.nvidia.com/en-us/on-demand/))
+- **Stephen Jones — "How CUDA Programming Works", GTC 2022** — bandwidth is the bottleneck, not FLOPS; why random
+  access is so much worse than linear: <https://medium.com/@zhuangh/fwd-stephen-jones-how-cuda-programming-works-gtc-2022-d385de535edb>
+- **Stephen Jones — "How to Write a CUDA Program", GTC 2024** (slides): <https://developer-blogs.nvidia.com/wp-content/uploads/2024/08/How-To-Write-A-CUDA-Program.pdf>
+- **"CUDA Techniques to Maximize Memory Bandwidth and Hide Latency", GTC 2025**: <https://www.nvidia.com/en-us/on-demand/session/gtc25-s72683/>
+- **NVIDIA Deep Learning Performance — Getting Started** — the official roofline / *arithmetic intensity* /
+  memory-bound-vs-math-bound writeup (low CUDA): <https://docs.nvidia.com/deeplearning/performance/dl-performance-getting-started/index.html>
+- **CUDA C++ Best Practices Guide** — coalescing, occupancy, bandwidth (still API-framed, but cost-model-aware):
+  <https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/>
+
+*Note: none of NVIDIA's material is "measure-it-live-yourself" — the talks assert the numbers, this notebook makes you
+run them. The rigorous **measured** equivalents are the microbenchmark papers cited above.*
+
+*Die photos (Fritzchens Fritz) are CC0 / reusable with credit; NVIDIA/Chips-and-Cheese diagrams are copyrighted — cited
+here as fair-use educational references.*

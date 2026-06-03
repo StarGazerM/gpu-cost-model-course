@@ -132,10 +132,11 @@ md('<table style="width:100%"><tr>'
    '<small>Intel i9-13900K (Raptor Lake): every block is *different* and labelled -- cores, L3, memory controller, '
    'fabric. Die photo: Fritzchens Fritz; labels: JmsDoug. CC0 (Wikimedia Commons).</small></td>'
    '<td style="width:50%;vertical-align:top"><b>GPU die -- a uniform field of tiles</b><br>'
-   '<img src="slides/figures/die_gpu_nvidia_g71.jpg" style="width:100%"><br>'
-   '<small>An NVIDIA die (G71, older -- shown for *structure*): a monotonous grid of the same tile + memory pads at '
-   'the edges. CC0 (M. Boer, Wikimedia). Modern Ada is the same idea at 142 SMs + 96 MB L2 -- see the SM diagram in '
-   'the <a href="https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf">Ada whitepaper</a>.</small></td>'
+   '<img src="slides/figures/die_gpu_ad102.jpg" style="width:100%"><br>'
+   '<small>NVIDIA <b>AD102</b> -- literally the chip this course runs on (RTX 4090 / RTX 6000 Ada, sm_89). A monotonous '
+   'grid of the *same* tile (the GPC/SM array) with memory PHYs at the rim; the etched "AD102-301-A1" is just the part '
+   'number. Near-IR die shot: Fritzchens Fritz, CC0 (Wikimedia Commons). Labelled block diagram: '
+   '<a href="https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf">Ada whitepaper</a>.</small></td>'
    '</tr></table>')
 
 md(r"""
