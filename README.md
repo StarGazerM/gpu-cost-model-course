@@ -49,3 +49,36 @@ jupyter nbconvert --to notebook --execute --inplace course.ipynb
 
 Built/verified on system Python 3.10, RTX 6000 Ada, HPC SDK 25.5. Numbers (latency ns, GB/s, cycles) are specific to
 that card — re-run on yours and the *shape* of every result should hold even as the absolute numbers move.
+
+## References & supporting material
+
+### Hardware — die shots & the architecture whitepaper (§0)
+- **NVIDIA Ada Lovelace (AD102) architecture whitepaper** — the SM block diagram (no branch predictor / no ROB / no
+  rename), L2 size, clocks: <https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf>
+- **Fritzchens Fritz — GA102 infrared die shots** (free to reuse with credit) — the SM array, the central L2 band, the
+  edge GDDR PHYs: <https://thinkcomputers.org/renowned-ir-photographer-fritzchens-fritz-shares-die-shots-of-nvidia-3000-series-ga-102-silicon/>
+- **Chips and Cheese — Zen 5 branch predictor** — a CPU core floorplan where the branch predictor + OoO get the area
+  budget the GPU spends on lanes/registers: <https://chipsandcheese.com/p/zen-5s-2-ahead-branch-predictor-unit-how-30-year-old-idea-allows-for-new-tricks>
+
+### Memory latency — the pointer-chase methodology (§2, §2.5)
+- **Mei & Chu — Dissecting GPU Memory Hierarchy through Microbenchmarking** (the canonical P-chase): <https://arxiv.org/abs/1509.02308>
+- **Chips and Cheese — Measuring GPU Memory Latency** (Ada's big/slow L2): <https://chipsandcheese.com/p/measuring-gpu-memory-latency>
+- **lmbench `lat_mem_rd`** — the CPU latency-staircase benchmark we mirror: <https://lmbench.sourceforge.net/man/lat_mem_rd.8.html>
+- **Demystifying the NVIDIA Ampere Architecture through Microbenchmarking**: <https://arxiv.org/abs/2208.11174>
+
+### Irregular access is survivable, not free (§2 reality check)
+- **Gunrock: GPU Graph Analytics** — BFS/PageRank ~order-of-magnitude over CPU despite irregular access: <https://arxiv.org/abs/1701.01170>
+- **A Comprehensive Overview of GPU-Accelerated Databases**: <https://arxiv.org/abs/2406.13831>
+- **Efficiently Processing Joins and Grouped Aggregations on GPUs**: <https://arxiv.org/abs/2312.00720>
+
+### The sort & the cost-model-vs-Big-O point (§3)
+- **CUB / CCCL — `cub::detail::StableOddEvenSort`** (the exact branchless network; `cub/thread/thread_sort.cuh`):
+  <https://github.com/NVIDIA/cccl>
+
+### CUDA is a leaky abstraction — the Triton contrast (§3 takeaway)
+- **Triton `Config` — `num_stages`** (software-pipelining / latency hiding as an explicit knob): <https://triton-lang.org/main/python-api/generated/triton.Config.html>
+- **Triton — memory coalescing & automatic vectorization** (SIMD packing the compiler owns): <https://deepwiki.com/triton-lang/triton/4.6-memory-coalescing-and-access-optimization>
+- **Warp Specialization in Triton** (PyTorch): <https://pytorch.org/blog/warp-specialization-in-triton-design-and-roadmap/>
+
+*Die photos (Fritzchens Fritz) are reusable with credit; NVIDIA/Chips-and-Cheese diagrams are copyrighted — cited here
+as fair-use educational references.*
