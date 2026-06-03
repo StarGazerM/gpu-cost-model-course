@@ -188,8 +188,30 @@ int main(){
 }
 """)
 md(r"""
-That's the whole model: **grid -> block -> warp(32) -> thread/lane**, `__global__`/`__device__`/`__shared__`/registers
-for *where data lives*, and a host that launches + synchronizes. Everything past here is making this *fast*.
+**Quick quiz -- nail the terms (each answer corrects the common wrong intuition).**
+Say that kernel launched `<<<4096, 256>>>` -- 4096 blocks x 256 threads:
+
+**Q1. Thread `i = 1000` -- which "core" (SM) runs it?**
+*Unknowable.* Threads come in **blocks** (`i=1000` -> block `1000/256 = 3`); the scheduler maps whole **blocks to SMs
+dynamically at runtime**, and you never know or rely on which. (And "core" isn't the SM anyway -- a "CUDA core" is a
+*lane*.) **There is no fixed thread -> SM map.**
+
+**Q2. Threads `i = 100` and `i = 110` -- same warp, just different lanes?**
+*Yes.* Same block, and `100/32 == 110/32 == 3` -> **warp 3**, running in **lockstep** as lanes 4 and 14.
+(But `i = 100` vs `i = 200`? warps 3 and 6 -- **not** lanes of each other; they interleave, possibly different cycles.)
+
+**Q3. Do all 256 threads of a block run at the same instant?**
+*No.* They are **resident on one SM**, but its 4 schedulers issue ~4 warps/clock and the 8 warps **interleave**.
+Only threads **in the same warp** are truly simultaneous. "Block = parallel" is wrong; **"warp = lockstep"** is right.
+
+**Q4. Can thread 5 read thread 70's register?**
+*Only by scope.* Same warp -> `__shfl` (registers are otherwise private). Different warps, same block -> through
+**`__shared__`** + `__syncthreads`. Different block -> only **global memory** + a fence. Sharing cost grows with distance.
+
+**Q5. Threads `i` and `i+1` read `a[i]` and `a[i+1]` -- one memory transaction, or two?**
+*One.* 32 consecutive threads of a warp -> 32 contiguous addresses -> **one coalesced 128-byte transaction** (the §4 game).
+
+If those five feel obvious now, the vocabulary is locked. Everything past here is making this model **fast**.
 """)
 
 # ============================================================================
