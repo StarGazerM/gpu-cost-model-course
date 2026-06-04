@@ -121,22 +121,26 @@ Give up single-thread latency; buy aggregate throughput. Everything weird follow
 fig("01_area.png", "CPU spends area on control+cache for one fast thread; the GPU on a sea of ALUs + a huge register file.")
 
 md(r"""
-**The same bet, in real silicon.** Forget the schematic for a second -- look at two actual dies. The **CPU** is a
-mosaic of *named, distinct* blocks (P-cores, E-cores, L2/L3 caches, memory controller, "compute fabric"): most of the
-area exists to keep a few threads fast. The **GPU** is the opposite -- a *uniform field of identical repeated tiles*
-with the memory interface around the rim; there is almost nothing to label because it is the **same compute unit
-stamped out hundreds of times**. Heterogeneous control vs homogeneous throughput -- that *is* the bet.
+**The same bet, in real silicon -- three dies, one story.** A single **CPU core** is mostly *control + cache* (branch
+prediction, decode, scheduler, microcode) wrapped around a *tiny* ALU -- almost all the area exists to keep **one**
+instruction stream fast. Scale the CPU up (an **EPYC**) and you get a *few dozen* of those fat cores -- chiplets
+(**CCDs**, each a core-complex / **CCX** with its own L3) around a central I/O die: still big cores, still
+cache-heavy. The **GPU** scales the *opposite* way -- thousands of *tiny* lanes as a uniform field of identical SM
+tiles, almost no per-lane control. **CPU = replicate a few fat cores; GPU = tile thousands of tiny ones.**
 """)
 md('<table style="width:100%"><tr>'
-   '<td style="width:50%;vertical-align:top"><b>CPU die -- full of named control</b><br>'
-   '<img src="slides/figures/die_cpu_i9_13900k.jpg" style="width:100%"><br>'
-   '<small>Intel i9-13900K (Raptor Lake): every block is *different* and labelled -- cores, L3, memory controller, '
-   'fabric. Die photo: Fritzchens Fritz; labels: JmsDoug. CC0 (Wikimedia Commons).</small></td>'
-   '<td style="width:50%;vertical-align:top"><b>GPU die -- a uniform field of tiles</b><br>'
+   '<td style="width:33%;vertical-align:top"><b>1. One CPU core</b><br>'
+   '<img src="slides/figures/die_cpu_annotated.png" style="width:100%"><br>'
+   '<small>Branch prediction, decode, scheduler, microcode, caches -- the **control + cache** machinery dwarfs the '
+   'lone **Int ALU**. Most of a core exists to make *one* stream fast. <i>(annotated die, educational)</i></small></td>'
+   '<td style="width:33%;vertical-align:top"><b>2. A whole CPU -- AMD EPYC</b><br>'
+   '<img src="slides/figures/epyc.png" style="width:100%"><br>'
+   '<small>The same fat core, replicated a *few dozen* times: chiplets (**CCDs** -- each a core-complex/**CCX** with '
+   'shared L3) ringing a central **I/O die**. Big cores + lots of cache. <i>(image: TechPowerUp)</i></small></td>'
+   '<td style="width:33%;vertical-align:top"><b>3. A whole GPU -- NVIDIA AD102</b><br>'
    '<img src="slides/figures/die_gpu_ad102.jpg" style="width:100%"><br>'
-   '<small>NVIDIA <b>AD102</b> -- literally the chip this course runs on (RTX 4090 / RTX 6000 Ada, sm_89). A monotonous '
-   'grid of the *same* tile (the GPC/SM array) with memory PHYs at the rim; the etched "AD102-301-A1" is just the part '
-   'number. Near-IR die shot: Fritzchens Fritz, CC0 (Wikimedia Commons). Labelled block diagram: '
+   '<small>The course chip (RTX 6000 Ada). A *uniform field* of the same SM tile stamped ~hundreds of times, memory '
+   'PHYs at the rim -- thousands of tiny lanes, almost no control. Near-IR die: Fritzchens Fritz, CC0. '
    '<a href="https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf">Ada whitepaper</a>.</small></td>'
    '</tr></table>')
 
