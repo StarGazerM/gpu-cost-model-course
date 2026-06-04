@@ -129,20 +129,27 @@ cache-heavy. The **GPU** scales the *opposite* way -- thousands of *tiny* lanes 
 tiles, almost no per-lane control. **CPU = replicate a few fat cores; GPU = tile thousands of tiny ones.**
 """)
 md('<table style="width:100%"><tr>'
-   '<td style="width:33%;vertical-align:top"><b>1. One CPU core</b><br>'
+   '<td style="width:50%;vertical-align:top"><b>1. One CPU core</b><br>'
    '<img src="slides/figures/die_cpu_annotated.png" style="width:100%"><br>'
    '<small>Branch prediction, decode, scheduler, microcode, caches -- the **control + cache** machinery dwarfs the '
    'lone **Int ALU**. Most of a core exists to make *one* stream fast. <i>(annotated die, educational)</i></small></td>'
-   '<td style="width:33%;vertical-align:top"><b>2. A whole CPU -- AMD EPYC</b><br>'
+   '<td style="width:50%;vertical-align:top"><b>2. A whole CPU -- AMD EPYC</b><br>'
    '<img src="slides/figures/epyc.png" style="width:100%"><br>'
    '<small>The same fat core, replicated a *few dozen* times: chiplets (**CCDs** -- each a core-complex/**CCX** with '
    'shared L3) ringing a central **I/O die**. Big cores + lots of cache. <i>(image: TechPowerUp)</i></small></td>'
-   '<td style="width:33%;vertical-align:top"><b>3. A whole GPU -- NVIDIA AD102</b><br>'
-   '<img src="slides/figures/die_gpu_ad102.jpg" style="width:100%"><br>'
-   '<small>The course chip (RTX 6000 Ada). A *uniform field* of the same SM tile stamped ~hundreds of times, memory '
-   'PHYs at the rim -- thousands of tiny lanes, almost no control. Near-IR die: Fritzchens Fritz, CC0. '
-   '<a href="https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf">Ada whitepaper</a>.</small></td>'
    '</tr></table>')
+md(r"""
+**3. A whole GPU -- the *same* picture, at two scales.** Here is the GPU, *labelled*. Both Ada **AD102** (this
+course's chip, GDDR6X) and Hopper **GH100** (the datacenter part, HBM) are the identical idea: a **uniform grid of
+GPC -> TPC -> SM tiles**, a **big central L2**, and **memory controllers at the edges** -- no branch predictors, no
+per-core control empire, just the SM tile stamped out and fed by memory. The CPU replicates a few fat cores; the GPU
+tiles *thousands* of tiny lanes -- and it looks the same whether it's a gaming Ada or a datacenter Hopper.
+""")
+md('<img src="slides/figures/ad102_gh100.png" style="width:100%"><br>'
+   '<small>AD102 (608 mm^2, 76B transistors, GDDR6X) vs GH100 (814 mm^2, 80B, HBM): annotated GPC / TPC / SM tiles, '
+   'the L2, and the memory PHYs around the rim. Renderings from NVIDIA, compiled/annotated by Locuza (not to relative '
+   'scale). Labelled block diagram: '
+   '<a href="https://images.nvidia.com/aem-dam/Solutions/geforce/ada/nvidia-ada-gpu-architecture.pdf">Ada whitepaper</a>.</small>')
 
 md(r"""
 ### 0.2 SIMT -- the GPU's *different* answer, and the words that mislead
