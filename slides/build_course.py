@@ -83,6 +83,29 @@ md(r"""
 The chip: a single **RTX 6000 Ada** (sm_89). Every claim below is **measured live** on it.
 """)
 
+md(r"""
+## Outline
+
+Each mechanism is one **canonical beat**: a card -> the concept -> a figure -> *you guess* -> a live `%%cuda` cell ->
+the measured cost model. The mechanisms recur; nothing is a black box.
+
+**The 1-hour course -- §0-§3 (~64 min):**
+- **§0 -- Foundation** *(~14m)*: von Neumann -> SIMD -> SIMT; the real silicon (CPU cores vs GPU tiles); the
+  programming model in one kernel; the blank **speeds-&-feeds scorecard** the rest of the hour fills in.
+- **§1 -- Bandwidth** *(~5m)*: STREAM Triad on CPU *and* GPU -- GB/s is the chip's unit.
+- **§2 -- Latency, the premise** *(~13m)*: the per-layer pointer-chase **staircase** (the GPU loses at *every* level),
+  then **hide** it on one SM. (+ **§2b** warps vs registers · **§2c** blocks -> SMs · **§2.5** the cache cliff)
+- **§3 -- A thread is a SIMD lane** *(~15m)*: sort a partition -- branchy merge vs `cub::StableOddEvenSort`; divergence,
+  SASS predication (data vs control), and why a "terrible" O(N^2) sort is *perfect* here (complexity vs cycles).
+
+**The 2-hour extension -- §4 onward** *(off the 1-hour clock)*:
+- **§4** Coalescing · **§5** Registers / ILP · **§6** Cost model (radix vs merge) · **§7** the two-sort capstone ·
+  **§8** "the kernel is ~10%" (the rug pull) · **§9** closing.
+
+> One thread running below: **guess from the cost model, then confirm in cycles / SASS.** The source is a hint; the
+> machine is the truth.
+""")
+
 code(r"""
 # setup: live-CUDA cells (%%cuda) + plotting. nvcc/ncu on PATH; arch set once.
 import os, subprocess, re
